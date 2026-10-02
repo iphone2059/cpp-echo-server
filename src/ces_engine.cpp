@@ -672,6 +672,15 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept
     worker->port = nullptr;
 }
 
+// A peer that resets before AcceptEx completes aborts that single incoming
+// connection; ERROR_NETNAME_DELETED is the documented outcome for it. Everything
+// else keeps the fatal classification so real listener or IOCP damage still stops
+// admission instead of being retried forever.
+static bool ces_engine_accept_error_is_recoverable(DWORD error) noexcept
+{
+    return error == ERROR_NETNAME_DELETED;
+}
+
 static bool ces_engine_post_accept(ces_engine_acceptor* acceptor, ces_engine_accept_operation* operation) noexcept
 {
     std::memset(&operation->overlapped, 0, sizeof(operation->overlapped));
@@ -775,13 +784,26 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept
             {
                 operation->state = ces_accept_state::idle;
                 ces_engine_accept_socket_close(operation);
-                if (!acceptor->stopping)
+                if (acceptor->stopping)
                 {
-                    ces_engine_report(L"AcceptEx completion", static_cast<int>(accept_error));
-                    acceptor->failed->store(true, std::memory_order_release);
-                    acceptor->stopping = true;
-                    ces_engine_acceptor_listener_close(acceptor);
+                    continue;
                 }
+                if (ces_engine_accept_error_is_recoverable(accept_error))
+                {
+                    // The peer aborted this single connection before AcceptEx completed;
+                    // the listener is still healthy, so only this slot is reposted.
+                    if (!ces_engine_post_accept(acceptor, operation))
+                    {
+                        acceptor->failed->store(true, std::memory_order_release);
+                        acceptor->stopping = true;
+                        ces_engine_acceptor_listener_close(acceptor);
+                    }
+                    continue;
+                }
+                ces_engine_report(L"AcceptEx completion", static_cast<int>(accept_error));
+                acceptor->failed->store(true, std::memory_order_release);
+                acceptor->stopping = true;
+                ces_engine_acceptor_listener_close(acceptor);
                 continue;
             }
             if (setsockopt(operation->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,

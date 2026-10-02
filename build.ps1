@@ -55,3 +55,7 @@ if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'CMake build failed.' }
 & ctest --test-dir $buildDirectory --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
+# A client that resets before AcceptEx completes must cost one accept slot, not the
+# listener: the server keeps echoing and still stops cleanly.
+& pwsh -NoProfile -File (Join-Path $projectRoot 'testsces_reset_storm_tests.ps1') -ServerPath (Join-Path $buildDirectory 'cpp-echo-server.exe') -Label 'cpp-echo-server'
+if ($LASTEXITCODE -ne 0) { throw 'Pre-accept reset recovery failed.' }
