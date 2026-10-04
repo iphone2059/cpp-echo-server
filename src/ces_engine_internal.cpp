@@ -7,26 +7,21 @@
 
 static constexpr std::uint32_t ces_timer_absent = UINT32_MAX;
 
-static bool ces_timer_less(const ces_timer_node& left, const ces_timer_node& right) noexcept
-{
+static bool ces_timer_less(const ces_timer_node& left, const ces_timer_node& right) noexcept {
     return left.deadline < right.deadline ||
            (left.deadline == right.deadline && left.connection_index < right.connection_index);
 }
 
-static void ces_timer_swap(ces_timer_heap* heap, std::uint32_t left, std::uint32_t right) noexcept
-{
+static void ces_timer_swap(ces_timer_heap* heap, std::uint32_t left, std::uint32_t right) noexcept {
     std::swap(heap->nodes[left], heap->nodes[right]);
-    heap->positions[heap->nodes[left].connection_index] = left;
+    heap->positions[heap->nodes[left].connection_index]  = left;
     heap->positions[heap->nodes[right].connection_index] = right;
 }
 
-static void ces_timer_sift_up(ces_timer_heap* heap, std::uint32_t position) noexcept
-{
-    while (position != 0)
-    {
+static void ces_timer_sift_up(ces_timer_heap* heap, std::uint32_t position) noexcept {
+    while (position != 0) {
         const std::uint32_t parent = (position - 1U) / 2U;
-        if (!ces_timer_less(heap->nodes[position], heap->nodes[parent]))
-        {
+        if (!ces_timer_less(heap->nodes[position], heap->nodes[parent])) {
             break;
         }
         ces_timer_swap(heap, position, parent);
@@ -34,23 +29,18 @@ static void ces_timer_sift_up(ces_timer_heap* heap, std::uint32_t position) noex
     }
 }
 
-static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) noexcept
-{
-    for (;;)
-    {
+static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) noexcept {
+    for (;;) {
         const std::uint32_t left = position * 2U + 1U;
-        if (left >= heap->size)
-        {
+        if (left >= heap->size) {
             return;
         }
-        const std::uint32_t right = left + 1U;
-        std::uint32_t smallest = left;
-        if (right < heap->size && ces_timer_less(heap->nodes[right], heap->nodes[left]))
-        {
+        const std::uint32_t right    = left + 1U;
+        std::uint32_t       smallest = left;
+        if (right < heap->size && ces_timer_less(heap->nodes[right], heap->nodes[left])) {
             smallest = right;
         }
-        if (!ces_timer_less(heap->nodes[smallest], heap->nodes[position]))
-        {
+        if (!ces_timer_less(heap->nodes[smallest], heap->nodes[position])) {
             return;
         }
         ces_timer_swap(heap, position, smallest);
@@ -58,34 +48,27 @@ static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) no
     }
 }
 
-[[noreturn]] void ces_engine_fail_fast(const wchar_t* stage, int error) noexcept
-{
+[[noreturn]] void ces_engine_fail_fast(const wchar_t* stage, int error) noexcept {
     std::fwprintf(stderr, L"%ls failed: native_error=%d\n", stage, error);
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(ces_exit_code::internal));
     __assume(0);
 }
 
-void ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept
-{
-    if (status != ERROR_SUCCESS)
-    {
+void ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept {
+    if (status != ERROR_SUCCESS) {
         ces_engine_fail_fast(stage, status);
     }
 }
 
-ULONG ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept
-{
-    if (count == RIO_CORRUPT_CQ)
-    {
+ULONG ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept {
+    if (count == RIO_CORRUPT_CQ) {
         ces_engine_fail_fast(stage, ERROR_INVALID_DATA);
     }
     return count;
 }
 
-void ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept
-{
-    if (total == nullptr || value == nullptr)
-    {
+void ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept {
+    if (total == nullptr || value == nullptr) {
         return;
     }
     total->accepted += value->accepted;
@@ -95,390 +78,325 @@ void ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistic
     total->bytes += value->bytes;
 }
 
-ces_socket_owner::ces_socket_owner() noexcept : value_(INVALID_SOCKET)
-{
-}
+ces_socket_owner::ces_socket_owner() noexcept : value_(INVALID_SOCKET) {}
 
-ces_socket_owner::ces_socket_owner(SOCKET value) noexcept : value_(value)
-{
-}
+ces_socket_owner::ces_socket_owner(SOCKET value) noexcept : value_(value) {}
 
-ces_socket_owner::~ces_socket_owner() noexcept
-{
+ces_socket_owner::~ces_socket_owner() noexcept {
     reset();
 }
 
-ces_socket_owner::ces_socket_owner(ces_socket_owner&& other) noexcept : value_(other.release())
-{
-}
+ces_socket_owner::ces_socket_owner(ces_socket_owner&& other) noexcept : value_(other.release()) {}
 
-ces_socket_owner& ces_socket_owner::operator=(ces_socket_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+ces_socket_owner& ces_socket_owner::operator=(ces_socket_owner&& other) noexcept {
+    if (this != &other) {
         reset(other.release());
     }
     return *this;
 }
 
-SOCKET ces_socket_owner::get() const noexcept
-{
+SOCKET ces_socket_owner::get() const noexcept {
     return value_;
 }
 
-SOCKET ces_socket_owner::release() noexcept
-{
+SOCKET ces_socket_owner::release() noexcept {
     const SOCKET value = value_;
-    value_ = INVALID_SOCKET;
+    value_             = INVALID_SOCKET;
     return value;
 }
 
-void ces_socket_owner::reset(SOCKET value) noexcept
-{
-    if (value_ != INVALID_SOCKET)
-    {
+void ces_socket_owner::reset(SOCKET value) noexcept {
+    if (value_ != INVALID_SOCKET) {
         closesocket(value_);
     }
     value_ = value;
 }
 
-ces_handle_owner::ces_handle_owner() noexcept : value_(nullptr)
-{
-}
+ces_handle_owner::ces_handle_owner() noexcept : value_(nullptr) {}
 
-ces_handle_owner::ces_handle_owner(HANDLE value) noexcept : value_(value)
-{
-}
+ces_handle_owner::ces_handle_owner(HANDLE value) noexcept : value_(value) {}
 
-ces_handle_owner::~ces_handle_owner() noexcept
-{
+ces_handle_owner::~ces_handle_owner() noexcept {
     reset();
 }
 
-ces_handle_owner::ces_handle_owner(ces_handle_owner&& other) noexcept : value_(other.release())
-{
-}
+ces_handle_owner::ces_handle_owner(ces_handle_owner&& other) noexcept : value_(other.release()) {}
 
-ces_handle_owner& ces_handle_owner::operator=(ces_handle_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+ces_handle_owner& ces_handle_owner::operator=(ces_handle_owner&& other) noexcept {
+    if (this != &other) {
         reset(other.release());
     }
     return *this;
 }
 
-HANDLE ces_handle_owner::get() const noexcept
-{
+HANDLE ces_handle_owner::get() const noexcept {
     return value_;
 }
 
-HANDLE ces_handle_owner::release() noexcept
-{
+HANDLE ces_handle_owner::release() noexcept {
     const HANDLE value = value_;
-    value_ = nullptr;
+    value_             = nullptr;
     return value;
 }
 
-void ces_handle_owner::reset(HANDLE value) noexcept
-{
-    if (value_ != nullptr && value_ != INVALID_HANDLE_VALUE)
-    {
+void ces_handle_owner::reset(HANDLE value) noexcept {
+    if (value_ != nullptr && value_ != INVALID_HANDLE_VALUE) {
         CloseHandle(value_);
     }
     value_ = value;
 }
 
-ces_virtual_arena_owner::ces_virtual_arena_owner() noexcept : value_(nullptr)
-{
-}
-ces_virtual_arena_owner::ces_virtual_arena_owner(void* value) noexcept : value_(value)
-{
-}
-ces_virtual_arena_owner::~ces_virtual_arena_owner() noexcept
-{
+ces_virtual_arena_owner::ces_virtual_arena_owner() noexcept : value_(nullptr) {}
+
+ces_virtual_arena_owner::ces_virtual_arena_owner(void* value) noexcept : value_(value) {}
+
+ces_virtual_arena_owner::~ces_virtual_arena_owner() noexcept {
     reset();
 }
-ces_virtual_arena_owner::ces_virtual_arena_owner(ces_virtual_arena_owner&& other) noexcept : value_(other.release())
-{
-}
-ces_virtual_arena_owner& ces_virtual_arena_owner::operator=(ces_virtual_arena_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+
+ces_virtual_arena_owner::ces_virtual_arena_owner(ces_virtual_arena_owner&& other) noexcept : value_(other.release()) {}
+
+ces_virtual_arena_owner& ces_virtual_arena_owner::operator=(ces_virtual_arena_owner&& other) noexcept {
+    if (this != &other) {
         reset(other.release());
     }
     return *this;
 }
-void* ces_virtual_arena_owner::get() const noexcept
-{
+
+void* ces_virtual_arena_owner::get() const noexcept {
     return value_;
 }
-void* ces_virtual_arena_owner::release() noexcept
-{
+
+void* ces_virtual_arena_owner::release() noexcept {
     void* value = value_;
-    value_ = nullptr;
+    value_      = nullptr;
     return value;
 }
-void ces_virtual_arena_owner::reset(void* value) noexcept
-{
-    if (value_ != nullptr)
-    {
+
+void ces_virtual_arena_owner::reset(void* value) noexcept {
+    if (value_ != nullptr) {
         VirtualFree(value_, 0, MEM_RELEASE);
     }
     value_ = value;
 }
 
-ces_heap_owner::ces_heap_owner() noexcept : value_(nullptr)
-{
-}
-ces_heap_owner::ces_heap_owner(void* value) noexcept : value_(value)
-{
-}
-ces_heap_owner::~ces_heap_owner() noexcept
-{
+ces_heap_owner::ces_heap_owner() noexcept : value_(nullptr) {}
+
+ces_heap_owner::ces_heap_owner(void* value) noexcept : value_(value) {}
+
+ces_heap_owner::~ces_heap_owner() noexcept {
     reset();
 }
-ces_heap_owner::ces_heap_owner(ces_heap_owner&& other) noexcept : value_(other.release())
-{
-}
-ces_heap_owner& ces_heap_owner::operator=(ces_heap_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+
+ces_heap_owner::ces_heap_owner(ces_heap_owner&& other) noexcept : value_(other.release()) {}
+
+ces_heap_owner& ces_heap_owner::operator=(ces_heap_owner&& other) noexcept {
+    if (this != &other) {
         reset(other.release());
     }
     return *this;
 }
-void* ces_heap_owner::get() const noexcept
-{
+
+void* ces_heap_owner::get() const noexcept {
     return value_;
 }
-void* ces_heap_owner::release() noexcept
-{
+
+void* ces_heap_owner::release() noexcept {
     void* value = value_;
-    value_ = nullptr;
+    value_      = nullptr;
     return value;
 }
-void ces_heap_owner::reset(void* value) noexcept
-{
-    if (value_ != nullptr)
-    {
+
+void ces_heap_owner::reset(void* value) noexcept {
+    if (value_ != nullptr) {
         HeapFree(GetProcessHeap(), 0, value_);
     }
     value_ = value;
 }
 
-ces_rio_registration_owner::ces_rio_registration_owner() noexcept : rio_(nullptr), value_(RIO_INVALID_BUFFERID)
-{
-}
+ces_rio_registration_owner::ces_rio_registration_owner() noexcept : rio_(nullptr), value_(RIO_INVALID_BUFFERID) {}
+
 ces_rio_registration_owner::ces_rio_registration_owner(const RIO_EXTENSION_FUNCTION_TABLE* rio,
-                                                       RIO_BUFFERID value) noexcept
-    : rio_(rio), value_(value)
-{
-}
-ces_rio_registration_owner::~ces_rio_registration_owner() noexcept
-{
+                                                       RIO_BUFFERID                        value) noexcept :
+    rio_(rio),
+    value_(value) {}
+
+ces_rio_registration_owner::~ces_rio_registration_owner() noexcept {
     reset();
 }
-ces_rio_registration_owner::ces_rio_registration_owner(ces_rio_registration_owner&& other) noexcept
-    : rio_(other.rio_), value_(other.release())
-{
+
+ces_rio_registration_owner::ces_rio_registration_owner(ces_rio_registration_owner&& other) noexcept :
+    rio_(other.rio_),
+    value_(other.release()) {
     other.rio_ = nullptr;
 }
-ces_rio_registration_owner& ces_rio_registration_owner::operator=(ces_rio_registration_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+
+ces_rio_registration_owner& ces_rio_registration_owner::operator=(ces_rio_registration_owner&& other) noexcept {
+    if (this != &other) {
         reset();
-        rio_ = other.rio_;
-        value_ = other.release();
+        rio_       = other.rio_;
+        value_     = other.release();
         other.rio_ = nullptr;
     }
     return *this;
 }
-RIO_BUFFERID ces_rio_registration_owner::get() const noexcept
-{
+
+RIO_BUFFERID ces_rio_registration_owner::get() const noexcept {
     return value_;
 }
-RIO_BUFFERID ces_rio_registration_owner::release() noexcept
-{
+
+RIO_BUFFERID ces_rio_registration_owner::release() noexcept {
     const RIO_BUFFERID value = value_;
-    value_ = RIO_INVALID_BUFFERID;
+    value_                   = RIO_INVALID_BUFFERID;
     return value;
 }
-void ces_rio_registration_owner::reset(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_BUFFERID value) noexcept
-{
-    if (value_ != RIO_INVALID_BUFFERID && rio_ != nullptr)
-    {
+
+void ces_rio_registration_owner::reset(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_BUFFERID value) noexcept {
+    if (value_ != RIO_INVALID_BUFFERID && rio_ != nullptr) {
         rio_->RIODeregisterBuffer(value_);
     }
-    rio_ = rio;
+    rio_   = rio;
     value_ = value;
 }
 
-ces_rio_cq_owner::ces_rio_cq_owner() noexcept : rio_(nullptr), value_(RIO_INVALID_CQ)
-{
-}
-ces_rio_cq_owner::ces_rio_cq_owner(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_CQ value) noexcept
-    : rio_(rio), value_(value)
-{
-}
-ces_rio_cq_owner::~ces_rio_cq_owner() noexcept
-{
+ces_rio_cq_owner::ces_rio_cq_owner() noexcept : rio_(nullptr), value_(RIO_INVALID_CQ) {}
+
+ces_rio_cq_owner::ces_rio_cq_owner(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_CQ value) noexcept :
+    rio_(rio),
+    value_(value) {}
+
+ces_rio_cq_owner::~ces_rio_cq_owner() noexcept {
     reset();
 }
-ces_rio_cq_owner::ces_rio_cq_owner(ces_rio_cq_owner&& other) noexcept : rio_(other.rio_), value_(other.release())
-{
+
+ces_rio_cq_owner::ces_rio_cq_owner(ces_rio_cq_owner&& other) noexcept : rio_(other.rio_), value_(other.release()) {
     other.rio_ = nullptr;
 }
-ces_rio_cq_owner& ces_rio_cq_owner::operator=(ces_rio_cq_owner&& other) noexcept
-{
-    if (this != &other)
-    {
+
+ces_rio_cq_owner& ces_rio_cq_owner::operator=(ces_rio_cq_owner&& other) noexcept {
+    if (this != &other) {
         reset();
-        rio_ = other.rio_;
-        value_ = other.release();
+        rio_       = other.rio_;
+        value_     = other.release();
         other.rio_ = nullptr;
     }
     return *this;
 }
-RIO_CQ ces_rio_cq_owner::get() const noexcept
-{
+
+RIO_CQ ces_rio_cq_owner::get() const noexcept {
     return value_;
 }
-RIO_CQ ces_rio_cq_owner::release() noexcept
-{
+
+RIO_CQ ces_rio_cq_owner::release() noexcept {
     const RIO_CQ value = value_;
-    value_ = RIO_INVALID_CQ;
+    value_             = RIO_INVALID_CQ;
     return value;
 }
-void ces_rio_cq_owner::reset(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_CQ value) noexcept
-{
-    if (value_ != RIO_INVALID_CQ && rio_ != nullptr)
-    {
+
+void ces_rio_cq_owner::reset(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_CQ value) noexcept {
+    if (value_ != RIO_INVALID_CQ && rio_ != nullptr) {
         rio_->RIOCloseCompletionQueue(value_);
     }
-    rio_ = rio;
+    rio_   = rio;
     value_ = value;
 }
 
-bool ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept
-{
+bool ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept {
     return lifecycle != nullptr && lifecycle->phase >= ces_worker_phase::admission_closed &&
            lifecycle->active_connections == 0 && lifecycle->pending_handoffs == 0;
 }
 
-bool ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept
-{
+bool ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept {
     return phase == ces_udp_phase::stopped && outstanding == 0;
 }
 
-bool ces_notification_packet_matches(ULONG_PTR key, const OVERLAPPED* overlapped, ULONG_PTR expected_key,
-                                     const OVERLAPPED* expected_overlapped) noexcept
-{
+bool ces_notification_packet_matches(ULONG_PTR         key,
+                                     const OVERLAPPED* overlapped,
+                                     ULONG_PTR         expected_key,
+                                     const OVERLAPPED* expected_overlapped) noexcept {
     return key == expected_key && overlapped == expected_overlapped;
 }
 
-bool ces_timer_initialize(ces_timer_heap* heap, ces_timer_node* nodes, std::uint32_t* positions,
-                          std::uint32_t capacity) noexcept
-{
-    if (heap == nullptr || nodes == nullptr || positions == nullptr || capacity == 0)
-    {
+bool ces_timer_initialize(ces_timer_heap* heap,
+                          ces_timer_node* nodes,
+                          std::uint32_t*  positions,
+                          std::uint32_t   capacity) noexcept {
+    if (heap == nullptr || nodes == nullptr || positions == nullptr || capacity == 0) {
         return false;
     }
-    heap->nodes = nodes;
+    heap->nodes     = nodes;
     heap->positions = positions;
-    heap->size = 0;
-    heap->capacity = capacity;
+    heap->size      = 0;
+    heap->capacity  = capacity;
     std::fill_n(positions, capacity, ces_timer_absent);
     return true;
 }
 
-bool ces_timer_insert_or_update(ces_timer_heap* heap, std::uint32_t connection_index, ULONGLONG deadline) noexcept
-{
-    if (heap == nullptr || connection_index >= heap->capacity)
-    {
+bool ces_timer_insert_or_update(ces_timer_heap* heap, std::uint32_t connection_index, ULONGLONG deadline) noexcept {
+    if (heap == nullptr || connection_index >= heap->capacity) {
         return false;
     }
     const std::uint32_t present = heap->positions[connection_index];
-    if (present != ces_timer_absent)
-    {
-        const ULONGLONG previous = heap->nodes[present].deadline;
+    if (present != ces_timer_absent) {
+        const ULONGLONG previous      = heap->nodes[present].deadline;
         heap->nodes[present].deadline = deadline;
-        if (deadline < previous)
-        {
+        if (deadline < previous) {
             ces_timer_sift_up(heap, present);
-        }
-        else
-        {
+        } else {
             ces_timer_sift_down(heap, present);
         }
         return true;
     }
-    if (heap->size == heap->capacity)
-    {
+    if (heap->size == heap->capacity) {
         return false;
     }
-    const std::uint32_t position = heap->size++;
-    heap->nodes[position] = ces_timer_node{deadline, connection_index};
+    const std::uint32_t position      = heap->size++;
+    heap->nodes[position]             = ces_timer_node{ deadline, connection_index };
     heap->positions[connection_index] = position;
     ces_timer_sift_up(heap, position);
     return true;
 }
 
-bool ces_timer_remove(ces_timer_heap* heap, std::uint32_t connection_index) noexcept
-{
-    if (heap == nullptr || connection_index >= heap->capacity)
-    {
+bool ces_timer_remove(ces_timer_heap* heap, std::uint32_t connection_index) noexcept {
+    if (heap == nullptr || connection_index >= heap->capacity) {
         return false;
     }
     const std::uint32_t position = heap->positions[connection_index];
-    if (position == ces_timer_absent)
-    {
+    if (position == ces_timer_absent) {
         return false;
     }
     heap->positions[connection_index] = ces_timer_absent;
     --heap->size;
-    if (position == heap->size)
-    {
+    if (position == heap->size) {
         return true;
     }
-    heap->nodes[position] = heap->nodes[heap->size];
+    heap->nodes[position]                                   = heap->nodes[heap->size];
     heap->positions[heap->nodes[position].connection_index] = position;
-    if (position != 0 && ces_timer_less(heap->nodes[position], heap->nodes[(position - 1U) / 2U]))
-    {
+    if (position != 0 && ces_timer_less(heap->nodes[position], heap->nodes[(position - 1U) / 2U])) {
         ces_timer_sift_up(heap, position);
-    }
-    else
-    {
+    } else {
         ces_timer_sift_down(heap, position);
     }
     return true;
 }
 
-bool ces_timer_pop_expired(ces_timer_heap* heap, ULONGLONG now, std::uint32_t* connection_index) noexcept
-{
-    if (heap == nullptr || connection_index == nullptr || heap->size == 0 || heap->nodes[0].deadline > now)
-    {
+bool ces_timer_pop_expired(ces_timer_heap* heap, ULONGLONG now, std::uint32_t* connection_index) noexcept {
+    if (heap == nullptr || connection_index == nullptr || heap->size == 0 || heap->nodes[0].deadline > now) {
         return false;
     }
     *connection_index = heap->nodes[0].connection_index;
     return ces_timer_remove(heap, *connection_index);
 }
 
-DWORD ces_timer_wait_milliseconds(const ces_timer_heap* heap, ULONGLONG now) noexcept
-{
-    if (heap == nullptr || heap->size == 0)
-    {
+DWORD ces_timer_wait_milliseconds(const ces_timer_heap* heap, ULONGLONG now) noexcept {
+    if (heap == nullptr || heap->size == 0) {
         return INFINITE;
     }
     const ULONGLONG deadline = heap->nodes[0].deadline;
-    if (deadline <= now)
-    {
+    if (deadline <= now) {
         return 0;
     }
     const ULONGLONG remaining = deadline - now;
-    const ULONGLONG maximum = static_cast<ULONGLONG>(INFINITE) - 1ULL;
+    const ULONGLONG maximum   = static_cast<ULONGLONG>(INFINITE) - 1ULL;
     return static_cast<DWORD>(std::min(remaining, maximum));
 }
