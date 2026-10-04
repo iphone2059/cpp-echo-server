@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 
+inline constexpr std::uint32_t CES_MAX_WORKERS = 64U;
+
 enum class ces_protocol : std::uint8_t { none = 0, tcp = 1, udp = 2 };
 
 enum class ces_exit_code : int { success = 0, usage = 1, network = 2, echo_failure = 3, internal = 4 };

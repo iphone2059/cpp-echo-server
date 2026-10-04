@@ -1,4 +1,5 @@
 #include "ces_engine_internal.h"
+#include "ces_rio_layout.h"
 #include "ces_types.h"
 
 // WinSock2.h must be included before the Windows networking headers below.
@@ -23,10 +24,11 @@ class ces_engine_winsock {
   public:
     bool started = false;
 
-    bool start() noexcept {
-        WSADATA data{};
-        started = WSAStartup(MAKEWORD(2, 2), &data) == 0;
-        return started;
+    int start() noexcept {
+        WSADATA   data{};
+        const int status = WSAStartup(MAKEWORD(2, 2), &data);
+        started          = status == 0;
+        return status;
     }
 
     ~ces_engine_winsock() noexcept {
@@ -36,13 +38,14 @@ class ces_engine_winsock {
     }
 };
 
-static constexpr ULONG_PTR     ces_engine_stop_key             = 1U;
-static constexpr ULONG_PTR     ces_engine_admission_closed_key = 2U;
-static constexpr ULONG         ces_engine_batch_size           = 256U;
-static constexpr std::uint32_t ces_engine_max_drain_batches    = 64U;
-static constexpr std::uint32_t ces_engine_accepts_per_worker   = 32U;
-static constexpr std::uint32_t ces_engine_max_accepts          = 1024U;
-static constexpr std::uint32_t ces_engine_udp_address_bytes    = sizeof(SOCKADDR_STORAGE) + 16U;
+static constexpr ULONG_PTR     ces_engine_stop_key                       = 1U;
+static constexpr ULONG_PTR     ces_engine_admission_closed_key           = 2U;
+static constexpr ULONG         ces_engine_batch_size                     = 256U;
+static constexpr std::uint32_t ces_engine_max_drain_batches              = 64U;
+static constexpr std::uint32_t ces_engine_accepts_per_worker             = 32U;
+static constexpr std::uint32_t ces_engine_max_accepts                    = 1024U;
+static constexpr std::uint32_t ces_engine_max_inline_accept_retries      = 4U;
+static constexpr ULONGLONG     ces_engine_notification_retire_timeout_ms = 5000ULL;
 
 static void ces_engine_acceptor_listener_close(ces_engine_acceptor* acceptor) noexcept {
     acceptor->resources->listener.reset();
@@ -409,7 +412,7 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
         // The port queue is FIFO, so a completion that raced the shutdown (a real RIONotify
         // delivery, an admission-close or stop packet, or a residual accept result) can precede
         // the packet just posted. Drain until the notification itself is retired.
-        const ULONGLONG deadline = GetTickCount64() + 1000U;
+        const ULONGLONG deadline = GetTickCount64() + ces_engine_notification_retire_timeout_ms;
         bool            retired  = false;
         while (!retired) {
             const ULONGLONG now       = GetTickCount64();
@@ -542,10 +545,8 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
         worker->thread = nullptr;
     }
     if (had_ready_worker) {
-        const ces_worker_phase phase =
-            worker->admission_closed ? ces_worker_phase::admission_closed : ces_worker_phase::draining;
-        const ces_worker_lifecycle lifecycle{ phase, worker->active_count, 0, worker->notification_armed };
-        if (!ces_worker_may_exit(&lifecycle) || worker->notification_armed || worker->timers.size != 0) {
+        if (!worker->stopping || !worker->admission_closed || worker->active_count != 0 ||
+            worker->free_count != worker->slot_count || worker->notification_armed || worker->timers.size != 0) {
             ces_engine_fail_fast(L"worker release precondition", ERROR_INVALID_STATE);
         }
     }
@@ -579,11 +580,30 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
 }
 
 static bool ces_engine_accept_error_is_recoverable(DWORD error) noexcept {
-    return error == ERROR_NETNAME_DELETED || error == static_cast<DWORD>(WSAECONNRESET);
+    return error == ERROR_NETNAME_DELETED || error == static_cast<DWORD>(WSAECONNRESET) ||
+           error == static_cast<DWORD>(WSAECONNABORTED);
+}
+
+static bool ces_engine_defer_accept_repost(ces_engine_acceptor*         acceptor,
+                                           ces_engine_accept_operation* operation) noexcept {
+    // Keep queued reposts live until their control packet is consumed during shutdown.
+    operation->state    = ces_accept_state::deferred;
+    const ULONG_PTR key = static_cast<ULONG_PTR>(reinterpret_cast<std::uintptr_t>(operation));
+    if (PostQueuedCompletionStatus(acceptor->port, 0, key, nullptr) == FALSE) {
+        ces_engine_fail_fast(L"PostQueuedCompletionStatus(deferred AcceptEx repost)", static_cast<int>(GetLastError()));
+    }
+    return true;
 }
 
 static bool ces_engine_post_accept(ces_engine_acceptor* acceptor, ces_engine_accept_operation* operation) noexcept {
-    for (;;) {
+    if (operation->state != ces_accept_state::idle || operation->socket != INVALID_SOCKET) {
+        ces_engine_fail_fast(L"AcceptEx repost precondition", ERROR_INVALID_STATE);
+    }
+    for (std::uint32_t retry = 0; retry < ces_engine_max_inline_accept_retries; ++retry) {
+        if (acceptor->stopping || acceptor->failed->load(std::memory_order_acquire) ||
+            acceptor->listener == INVALID_SOCKET) {
+            return true;
+        }
         std::memset(&operation->overlapped, 0, sizeof(operation->overlapped));
         operation->socket = ces_engine_registered_socket(SOCK_STREAM, IPPROTO_TCP);
         acceptor->resources->operation_sockets[operation->index].reset(operation->socket);
@@ -611,6 +631,18 @@ static bool ces_engine_post_accept(ces_engine_acceptor* acceptor, ces_engine_acc
         ces_engine_report(L"AcceptEx", static_cast<int>(error));
         return false;
     }
+    return ces_engine_defer_accept_repost(acceptor, operation);
+}
+
+static void ces_engine_stop_acceptor(ces_engine_acceptor* acceptor) noexcept {
+    acceptor->stopping = true;
+    ces_engine_acceptor_listener_close(acceptor);
+    for (std::uint32_t index = 0; index < acceptor->operation_count; ++index) {
+        if (acceptor->operations[index].state == ces_accept_state::posted) {
+            // Cancellation still owns the OVERLAPPED until its IOCP completion arrives.
+            ces_engine_accept_socket_close(&acceptor->operations[index]);
+        }
+    }
 }
 
 static bool ces_engine_acceptor_has_live(const ces_engine_acceptor* acceptor) noexcept {
@@ -627,69 +659,67 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
     for (std::uint32_t index = 0; index < acceptor->operation_count; ++index) {
         if (!ces_engine_post_accept(acceptor, &acceptor->operations[index])) {
             acceptor->failed->store(true, std::memory_order_release);
-            acceptor->stopping = true;
+            ces_engine_stop_acceptor(acceptor);
             break;
         }
     }
 
     while (!acceptor->stopping || ces_engine_acceptor_has_live(acceptor)) {
+        if (!acceptor->stopping && acceptor->failed->load(std::memory_order_acquire)) {
+            ces_engine_stop_acceptor(acceptor);
+            if (!ces_engine_acceptor_has_live(acceptor)) {
+                break;
+            }
+        }
         DWORD       transferred = 0;
         ULONG_PTR   key         = 0;
         OVERLAPPED* overlapped  = nullptr;
         const BOOL  ok          = GetQueuedCompletionStatus(acceptor->port, &transferred, &key, &overlapped, 100);
         const DWORD wait_error  = ok == FALSE ? GetLastError() : ERROR_SUCCESS;
         if (overlapped == nullptr && key == ces_engine_stop_key) {
-            acceptor->stopping = true;
-            ces_engine_acceptor_listener_close(acceptor);
-            for (std::uint32_t index = 0; index < acceptor->operation_count; ++index) {
-                if (acceptor->operations[index].state == ces_accept_state::posted) {
-                    ces_engine_accept_socket_close(&acceptor->operations[index]);
-                }
-            }
+            ces_engine_stop_acceptor(acceptor);
             continue;
         }
         if (overlapped == nullptr && key > ces_engine_stop_key) {
             ces_engine_accept_operation* operation =
                 reinterpret_cast<ces_engine_accept_operation*>(static_cast<std::uintptr_t>(key));
+            if (operation->state != ces_accept_state::transit && operation->state != ces_accept_state::deferred) {
+                ces_engine_fail_fast(L"AcceptEx repost packet state", ERROR_INVALID_STATE);
+            }
             operation->state = ces_accept_state::idle;
             if (!acceptor->stopping && !ces_engine_post_accept(acceptor, operation)) {
                 acceptor->failed->store(true, std::memory_order_release);
-                acceptor->stopping = true;
-                ces_engine_acceptor_listener_close(acceptor);
+                ces_engine_stop_acceptor(acceptor);
             }
             continue;
         }
         if (overlapped != nullptr) {
-            ces_engine_accept_operation* operation        = reinterpret_cast<ces_engine_accept_operation*>(overlapped);
-            DWORD                        accept_bytes     = 0;
-            DWORD                        accept_flags     = 0;
-            BOOL                         accept_completed = FALSE;
-            DWORD                        accept_error     = wait_error;
-            if (ok != FALSE) {
-                accept_completed =
-                    WSAGetOverlappedResult(acceptor->listener, overlapped, &accept_bytes, FALSE, &accept_flags);
-                if (accept_completed == FALSE) {
-                    accept_error = static_cast<DWORD>(WSAGetLastError());
-                }
+            ces_engine_accept_operation* operation = reinterpret_cast<ces_engine_accept_operation*>(overlapped);
+            if (operation->state != ces_accept_state::posted) {
+                ces_engine_fail_fast(L"AcceptEx completion state", ERROR_INVALID_STATE);
             }
-            if (accept_completed == FALSE) {
+            if (ok == FALSE) {
                 operation->state = ces_accept_state::idle;
                 ces_engine_accept_socket_close(operation);
-                if (acceptor->stopping) {
+                if (acceptor->stopping || acceptor->failed->load(std::memory_order_acquire)) {
                     continue;
                 }
-                if (ces_engine_accept_error_is_recoverable(accept_error)) {
+                if (ces_engine_accept_error_is_recoverable(wait_error)) {
                     if (!ces_engine_post_accept(acceptor, operation)) {
                         acceptor->failed->store(true, std::memory_order_release);
-                        acceptor->stopping = true;
-                        ces_engine_acceptor_listener_close(acceptor);
+                        ces_engine_stop_acceptor(acceptor);
                     }
                     continue;
                 }
-                ces_engine_report(L"AcceptEx completion", static_cast<int>(accept_error));
+                ces_engine_report(L"AcceptEx completion", static_cast<int>(wait_error));
                 acceptor->failed->store(true, std::memory_order_release);
-                acceptor->stopping = true;
-                ces_engine_acceptor_listener_close(acceptor);
+                ces_engine_stop_acceptor(acceptor);
+                continue;
+            }
+            if (acceptor->stopping || acceptor->failed->load(std::memory_order_acquire) ||
+                acceptor->listener == INVALID_SOCKET || operation->socket == INVALID_SOCKET) {
+                operation->state = ces_accept_state::idle;
+                ces_engine_accept_socket_close(operation);
                 continue;
             }
             if (setsockopt(operation->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
@@ -698,8 +728,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
                 operation->state = ces_accept_state::idle;
                 ces_engine_accept_socket_close(operation);
                 acceptor->failed->store(true, std::memory_order_release);
-                acceptor->stopping = true;
-                ces_engine_acceptor_listener_close(acceptor);
+                ces_engine_stop_acceptor(acceptor);
                 continue;
             }
             SOCKADDR* local_address  = nullptr;
@@ -714,8 +743,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
                 operation->state = ces_accept_state::idle;
                 ces_engine_accept_socket_close(operation);
                 acceptor->failed->store(true, std::memory_order_release);
-                acceptor->stopping = true;
-                ces_engine_acceptor_listener_close(acceptor);
+                ces_engine_stop_acceptor(acceptor);
                 continue;
             }
             operation->state               = ces_accept_state::transit;
@@ -729,8 +757,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
         if (ok == FALSE && wait_error != WAIT_TIMEOUT) {
             ces_engine_report(L"GetQueuedCompletionStatus(acceptor)", static_cast<int>(wait_error));
             acceptor->failed->store(true, std::memory_order_release);
-            acceptor->stopping = true;
-            ces_engine_acceptor_listener_close(acceptor);
+            ces_engine_stop_acceptor(acceptor);
         }
     }
     return acceptor->failed->load(std::memory_order_acquire) ? 1U : 0U;
@@ -843,7 +870,8 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                         std::atomic<bool>*                  stop_requested) noexcept {
     std::uint32_t worker_count = options->worker_count;
     if (worker_count == 0) {
-        worker_count = std::clamp(static_cast<std::uint32_t>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)), 1U, 32U);
+        worker_count =
+            std::clamp(static_cast<std::uint32_t>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)), 1U, CES_MAX_WORKERS);
     }
     ces_engine_worker* workers = static_cast<ces_engine_worker*>(
         HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ces_engine_worker) * worker_count));
@@ -930,13 +958,16 @@ static void ces_engine_udp_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
 static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                         const ces_options*                  options,
                                         std::atomic<bool>*                  stop_requested) noexcept {
-    const std::uint32_t stride      = options->rio_buffer_bytes + ces_engine_udp_address_bytes;
+    const std::uint32_t stride      = options->rio_buffer_bytes + CES_UDP_ADDRESS_BYTES;
     std::size_t         arena_bytes = 0;
-    if (options->udp_depth > options->cq_capacity / 2U ||
-        !ces_checked_arena_bytes(options->udp_depth, stride, options->memory_bytes, &arena_bytes) ||
+    if (options->udp_depth > options->cq_capacity / 2U) {
+        ces_engine_report(L"UDP CQ capacity", ERROR_INSUFFICIENT_BUFFER);
+        return ces_exit_code::usage;
+    }
+    if (!ces_checked_arena_bytes(options->udp_depth, stride, options->memory_bytes, &arena_bytes) ||
         arena_bytes > std::numeric_limits<DWORD>::max()) {
-        ces_engine_report(L"UDP queue/arena capacity", ERROR_NOT_ENOUGH_MEMORY);
-        return ces_exit_code::network;
+        ces_engine_report(L"UDP registered arena", ERROR_NOT_ENOUGH_MEMORY);
+        return ces_exit_code::usage;
     }
 
     ces_socket_owner        socket_owner{ ces_engine_registered_socket(SOCK_DGRAM, IPPROTO_UDP) };
@@ -1001,7 +1032,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         for (std::uint32_t index = 0; index < options->udp_depth; ++index) {
             slots[index].payload = RIO_BUF{ registration, index * stride, options->rio_buffer_bytes };
             slots[index].remote_address =
-                RIO_BUF{ registration, index * stride + options->rio_buffer_bytes, ces_engine_udp_address_bytes };
+                RIO_BUF{ registration, index * stride + options->rio_buffer_bytes, CES_UDP_ADDRESS_BYTES };
             slots[index].operation   = ces_engine_operation::receive;
             slots[index].outstanding = true;
             if (rio->RIOReceiveEx(request_queue, &slots[index].payload, 1, nullptr, &slots[index].remote_address,
@@ -1132,7 +1163,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         }
         // Drain FIFO leftovers (a real RIONotify delivery or a residual datagram result) until
         // the notification OVERLAPPED itself comes back, instead of assuming it is first.
-        const ULONGLONG deadline = GetTickCount64() + 1000U;
+        const ULONGLONG deadline = GetTickCount64() + ces_engine_notification_retire_timeout_ms;
         bool            retired  = false;
         while (!retired) {
             const ULONGLONG now       = GetTickCount64();
@@ -1178,8 +1209,9 @@ ces_exit_code ces_run_server(const ces_options* options, std::atomic<bool>* stop
         return ces_exit_code::internal;
     }
     ces_engine_winsock winsock{};
-    if (!winsock.start()) {
-        ces_engine_report(L"WSAStartup", WSAGetLastError());
+    const int          winsock_status = winsock.start();
+    if (winsock_status != 0) {
+        ces_engine_report(L"WSAStartup", winsock_status);
         return ces_exit_code::network;
     }
     RIO_EXTENSION_FUNCTION_TABLE rio{};

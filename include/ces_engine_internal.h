@@ -57,7 +57,7 @@ struct ces_timer_heap {
 
 enum class ces_engine_operation : std::uint8_t { receive, send };
 
-enum class ces_accept_state : LONG { idle = 0, posted = 1, transit = 2 };
+enum class ces_accept_state : LONG { idle = 0, posted = 1, transit = 2, deferred = 3 };
 
 struct ces_engine_worker;
 struct ces_engine_connection;

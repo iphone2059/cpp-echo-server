@@ -1,3 +1,4 @@
+#include "ces_rio_layout.h"
 #include "ces_types.h"
 
 #include <algorithm>
@@ -115,6 +116,7 @@ bool ces_parse_options(int             argc,
     bool saw_timeout    = false;
     bool saw_udp_depth  = false;
     bool saw_rio_buffer = false;
+    bool saw_workers    = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view token{ argv[index] };
@@ -180,8 +182,9 @@ bool ces_parse_options(int             argc,
         } else if (ces_contract_equal(name, L"k") && number >= 1 && number <= 65536) {
             options->udp_depth = static_cast<std::uint32_t>(number);
             saw_udp_depth      = true;
-        } else if (ces_contract_equal(name, L"threads") && number <= 64) {
+        } else if (ces_contract_equal(name, L"threads") && number <= CES_MAX_WORKERS) {
             options->worker_count = static_cast<std::uint32_t>(number);
+            saw_workers           = true;
         } else if (ces_contract_equal(name, L"rio-buffer") && number >= 512 && number <= 1048576) {
             options->rio_buffer_bytes = static_cast<std::uint32_t>(number);
             saw_rio_buffer            = true;
@@ -195,19 +198,16 @@ bool ces_parse_options(int             argc,
         }
     }
 
-    if (options->help) {
-        return true;
-    }
-    if (options->protocol == ces_protocol::none) {
-        ces_contract_error(error, error_capacity, L"missing /p tcp or /p udp");
-        return false;
-    }
     if (options->protocol == ces_protocol::tcp && saw_udp_depth) {
         ces_contract_error(error, error_capacity, L"/k is available only for UDP");
         return false;
     }
     if (options->protocol == ces_protocol::udp && saw_timeout) {
         ces_contract_error(error, error_capacity, L"/t is available only for TCP");
+        return false;
+    }
+    if (options->protocol == ces_protocol::udp && saw_workers) {
+        ces_contract_error(error, error_capacity, L"/threads is available only for TCP");
         return false;
     }
     if (options->protocol == ces_protocol::udp) {
@@ -217,6 +217,25 @@ bool ces_parse_options(int             argc,
             ces_contract_error(error, error_capacity, L"UDP /rio-buffer must be at least 65507 bytes");
             return false;
         }
+        if (options->udp_depth > options->cq_capacity / 2U) {
+            ces_contract_error(error, error_capacity, L"UDP /cq capacity must be at least twice /k");
+            return false;
+        }
+        const std::size_t stride      = static_cast<std::size_t>(options->rio_buffer_bytes) + CES_UDP_ADDRESS_BYTES;
+        std::size_t       arena_bytes = 0;
+        if (!ces_checked_arena_bytes(options->udp_depth, stride, options->memory_bytes, &arena_bytes) ||
+            arena_bytes > std::numeric_limits<std::uint32_t>::max()) {
+            ces_contract_error(error, error_capacity,
+                               L"UDP registered arena exceeds /memory or the 32-bit buffer limit");
+            return false;
+        }
+    }
+    if (options->help) {
+        return true;
+    }
+    if (options->protocol == ces_protocol::none) {
+        ces_contract_error(error, error_capacity, L"missing /p tcp or /p udp");
+        return false;
     }
     return true;
 }
