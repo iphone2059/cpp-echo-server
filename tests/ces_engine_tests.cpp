@@ -190,25 +190,81 @@ static void ces_engine_test_timer_model() noexcept {
 
 static void ces_engine_test_statistics() noexcept {
     ces_engine_statistics total{};
-    ces_engine_test_expect(
-        total.accepted == 0 && total.completions == 0 && total.receives == 0 && total.sends == 0 && total.bytes == 0,
-        "server statistics zero initialize");
+    ces_engine_test_expect(total.accepted == 0 && total.completions == 0 && total.receives == 0 && total.sends == 0 &&
+                               total.bytes == 0 && total.received_bytes == 0 && total.sent_bytes == 0 &&
+                               total.network_errors == 0 && total.rejected == 0,
+                           "server statistics zero initialize");
 
-    const ces_engine_statistics first{ 3, 11, 5, 6, 4096 };
-    const ces_engine_statistics second{ 7, 19, 9, 10, 8192 };
+    const ces_engine_statistics first{ 3, 11, 5, 6, 4096, 5000, 4096, 1, 2 };
+    const ces_engine_statistics second{ 7, 19, 9, 10, 8192, 9000, 8192, 3, 4 };
     ces_statistics_add(&total, &first);
     ces_statistics_add(&total, &second);
     ces_engine_test_expect(total.accepted == 10 && total.completions == 30 && total.receives == 14 &&
-                               total.sends == 16 && total.bytes == 12288,
+                               total.sends == 16 && total.bytes == 12288 && total.received_bytes == 14000 &&
+                               total.sent_bytes == total.bytes && total.network_errors == 4 && total.rejected == 6,
                            "server statistics aggregate worker snapshots");
 
-    ces_engine_statistics       large{ std::numeric_limits<std::uint64_t>::max() - 100U, 0, 0, 0,
-                                 std::numeric_limits<std::uint64_t>::max() - 4096U };
-    const ces_engine_statistics remainder{ 100, 0, 0, 0, 4096 };
+    ces_engine_statistics       large{ std::numeric_limits<std::uint64_t>::max() - 100U,
+                                 0,
+                                 0,
+                                 0,
+                                 std::numeric_limits<std::uint64_t>::max() - 4096U,
+                                 std::numeric_limits<std::uint64_t>::max() - 5000U,
+                                 std::numeric_limits<std::uint64_t>::max() - 4096U,
+                                 std::numeric_limits<std::uint64_t>::max() - 2U,
+                                 std::numeric_limits<std::uint64_t>::max() - 3U };
+    const ces_engine_statistics remainder{ 100, 0, 0, 0, 4096, 5000, 4096, 2, 3 };
     ces_statistics_add(&large, &remainder);
     ces_engine_test_expect(large.accepted == std::numeric_limits<std::uint64_t>::max() &&
-                               large.bytes == std::numeric_limits<std::uint64_t>::max(),
+                               large.bytes == std::numeric_limits<std::uint64_t>::max() &&
+                               large.received_bytes == std::numeric_limits<std::uint64_t>::max() &&
+                               large.sent_bytes == large.bytes &&
+                               large.network_errors == std::numeric_limits<std::uint64_t>::max() &&
+                               large.rejected == std::numeric_limits<std::uint64_t>::max(),
                            "server statistics preserve exact large-value addition");
+}
+
+static void ces_engine_test_completion_statistics() noexcept {
+    ces_engine_statistics statistics{};
+    ces_statistics_record_completion(&statistics, ces_engine_operation::receive, ERROR_SUCCESS, 11, false);
+    ces_statistics_record_completion(&statistics, ces_engine_operation::send, ERROR_SUCCESS, 4, false);
+    ces_statistics_record_completion(&statistics, ces_engine_operation::send, ERROR_SUCCESS, 7, false);
+    ces_engine_test_expect(statistics.completions == 3 && statistics.receives == 1 && statistics.sends == 2 &&
+                               statistics.received_bytes == 11 && statistics.sent_bytes == 11 && statistics.bytes == 11,
+                           "server counts successful partial sends by native bytes rather than echo size");
+
+    ces_statistics_record_completion(&statistics, ces_engine_operation::receive, ERROR_SUCCESS, 0, false);
+    ces_statistics_record_completion(&statistics, ces_engine_operation::send, ERROR_SUCCESS, 0, false);
+    ces_engine_test_expect(statistics.completions == 5 && statistics.receives == 2 && statistics.sends == 3 &&
+                               statistics.received_bytes == 11 && statistics.sent_bytes == 11 &&
+                               statistics.network_errors == 0,
+                           "server counts TCP EOF and zero-byte UDP completions without inventing bytes or errors");
+
+    ces_statistics_record_completion(&statistics, ces_engine_operation::receive, WSAECONNRESET, 9000, false);
+    ces_statistics_record_completion(&statistics, ces_engine_operation::send, ERROR_OPERATION_ABORTED, 9000, true);
+    ces_engine_test_expect(statistics.completions == 7 && statistics.receives == 2 && statistics.sends == 3 &&
+                               statistics.received_bytes == 11 && statistics.sent_bytes == 11 &&
+                               statistics.network_errors == 1,
+                           "server counts failed completions once and excludes cancellation and error bytes");
+
+    ces_statistics_record_completion(&statistics, ces_engine_operation::receive, ERROR_SUCCESS, 5, true);
+    ces_statistics_record_completion(&statistics, ces_engine_operation::send, ERROR_SUCCESS, 3, true);
+    ces_engine_test_expect(statistics.completions == 9 && statistics.receives == 3 && statistics.sends == 4 &&
+                               statistics.received_bytes == 16 && statistics.sent_bytes == 14 &&
+                               statistics.bytes == statistics.sent_bytes && statistics.network_errors == 1,
+                           "server preserves successful native byte accounting while closing");
+}
+
+static void ces_engine_test_accept_capacity() noexcept {
+    ces_engine_test_expect(
+        ces_accept_operation_count(0) == 8 && ces_accept_operation_count(1) == 8 && ces_accept_operation_count(4) == 8,
+        "server accept pool retains its minimum for small worker counts");
+    ces_engine_test_expect(ces_accept_operation_count(5) == 10 && ces_accept_operation_count(8) == 16 &&
+                               ces_accept_operation_count(32) == 64 && ces_accept_operation_count(63) == 126,
+                           "server accept pool reserves two slots per worker above its minimum");
+    ces_engine_test_expect(ces_accept_operation_count(64) == 128 && ces_accept_operation_count(65) == 128 &&
+                               ces_accept_operation_count(std::numeric_limits<std::uint32_t>::max()) == 128,
+                           "server accept pool caps at 128 without overflowing the worker product");
 }
 
 int main() {
@@ -217,6 +273,8 @@ int main() {
     ces_engine_test_timer();
     ces_engine_test_timer_model();
     ces_engine_test_statistics();
+    ces_engine_test_completion_statistics();
+    ces_engine_test_accept_capacity();
     std::printf("server_engine_failures=%d\n", ces_engine_test_failures);
     return ces_engine_test_failures == 0 ? 0 : 1;
 }

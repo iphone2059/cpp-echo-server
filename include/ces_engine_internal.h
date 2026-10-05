@@ -41,6 +41,10 @@ struct ces_engine_statistics {
     std::uint64_t receives;
     std::uint64_t sends;
     std::uint64_t bytes;
+    std::uint64_t received_bytes;
+    std::uint64_t sent_bytes;
+    std::uint64_t network_errors;
+    std::uint64_t rejected;
 };
 
 struct ces_timer_node {
@@ -117,11 +121,7 @@ struct ces_engine_worker {
     std::uint32_t                       active_count;
     std::uint32_t                       stride;
     std::uint32_t                       worker_index;
-    std::uint64_t                       accepted_count;
-    std::uint64_t                       completion_count;
-    std::uint64_t                       receive_count;
-    std::uint64_t                       send_count;
-    std::uint64_t                       echoed_bytes;
+    ces_engine_statistics               statistics;
     bool                                notification_armed;
     bool                                stopping;
     bool                                admission_closed;
@@ -143,6 +143,7 @@ struct ces_engine_acceptor {
     ces_engine_accept_operation*        operations;
     std::uint32_t                       operation_count;
     std::uint32_t                       next_worker;
+    std::uint64_t                       network_errors;
     bool                                stopping;
 };
 
@@ -298,6 +299,12 @@ class ces_engine_acceptor_resources {
 void              ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept;
 ULONG             ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept;
 void              ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept;
+void              ces_statistics_record_completion(ces_engine_statistics* statistics,
+                                                   ces_engine_operation   operation,
+                                                   LONG                   status,
+                                                   ULONG                  bytes_transferred,
+                                                   bool                   closing) noexcept;
+std::uint32_t     ces_accept_operation_count(std::uint32_t worker_count) noexcept;
 bool              ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept;
 bool              ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept;
 bool              ces_notification_packet_matches(ULONG_PTR         key,

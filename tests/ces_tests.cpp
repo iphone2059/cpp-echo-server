@@ -22,17 +22,16 @@ static wchar_t* ces_test_arg(const wchar_t* value) noexcept {
 }
 
 static void ces_test_parser() noexcept {
-    std::array<wchar_t*, 13> udp_args{ ces_test_arg(L"server"),      ces_test_arg(L"/p"),       ces_test_arg(L"udp"),
-                                       ces_test_arg(L"/s"),          ces_test_arg(L"4578"),     ces_test_arg(L"/k"),
-                                       ces_test_arg(L"512"),         ces_test_arg(L"/threads"), ces_test_arg(L"4"),
-                                       ces_test_arg(L"/rio-buffer"), ces_test_arg(L"65507"),    ces_test_arg(L"/q"),
-                                       ces_test_arg(L"/stats") };
+    std::array<wchar_t*, 11> udp_args{ ces_test_arg(L"server"), ces_test_arg(L"/p"),          ces_test_arg(L"udp"),
+                                       ces_test_arg(L"/s"),     ces_test_arg(L"4578"),        ces_test_arg(L"/k"),
+                                       ces_test_arg(L"512"),    ces_test_arg(L"/rio-buffer"), ces_test_arg(L"65507"),
+                                       ces_test_arg(L"/q"),     ces_test_arg(L"/stats") };
     ces_options              options{};
     std::array<wchar_t, CES_ERROR_CAPACITY> error{};
     const bool                              parsed =
         ces_parse_options(static_cast<int>(udp_args.size()), udp_args.data(), &options, error.data(), error.size());
     ces_test_expect(parsed && options.protocol == ces_protocol::udp && options.port == 4578 &&
-                        options.udp_depth == 512 && options.worker_count == 4 && options.rio_buffer_bytes == 65507 &&
+                        options.udp_depth == 512 && options.worker_count == 1 && options.rio_buffer_bytes == 65507 &&
                         options.quiet && options.stats,
                     "server parses UDP options");
 
@@ -68,6 +67,60 @@ static void ces_test_parser() noexcept {
                     "server rejects empty inline value without consuming the next token");
 }
 
+static void ces_test_udp_workers_and_capacity() noexcept {
+    ces_options                             options{};
+    std::array<wchar_t, CES_ERROR_CAPACITY> error{};
+    std::array<wchar_t*, 5> worker_args{ ces_test_arg(L"server"), ces_test_arg(L"/p"), ces_test_arg(L"udp"),
+                                         ces_test_arg(L"/threads"), ces_test_arg(L"0") };
+    ces_test_expect(ces_parse_options(static_cast<int>(worker_args.size()), worker_args.data(), &options, error.data(),
+                                      error.size()) &&
+                        options.worker_count == 1,
+                    "server UDP normalizes explicit automatic workers to one");
+    worker_args[4] = ces_test_arg(L"1");
+    ces_test_expect(ces_parse_options(static_cast<int>(worker_args.size()), worker_args.data(), &options, error.data(),
+                                      error.size()) &&
+                        options.worker_count == 1,
+                    "server UDP accepts one explicit worker");
+    worker_args[4] = ces_test_arg(L"2");
+    error.fill(L'\0');
+    ces_test_expect(!ces_parse_options(static_cast<int>(worker_args.size()), worker_args.data(), &options, error.data(),
+                                       error.size()) &&
+                        std::wcsstr(error.data(), L"0 or 1") != nullptr,
+                    "server UDP rejects multiple workers with a specific diagnostic");
+
+    std::array<wchar_t*, 6> help_args{ ces_test_arg(L"server"), ces_test_arg(L"/h"),       ces_test_arg(L"/p"),
+                                       ces_test_arg(L"udp"),    ces_test_arg(L"/threads"), ces_test_arg(L"0") };
+    ces_test_expect(
+        ces_parse_options(static_cast<int>(help_args.size()), help_args.data(), &options, error.data(), error.size()) &&
+            options.help && options.worker_count == 1,
+        "server UDP help accepts automatic workers and normalizes them");
+    help_args[5] = ces_test_arg(L"2");
+    ces_test_expect(
+        !ces_parse_options(static_cast<int>(help_args.size()), help_args.data(), &options, error.data(), error.size()),
+        "server UDP help still rejects an explicit worker conflict");
+
+    std::array<wchar_t*, 7> depth_args{ ces_test_arg(L"server"), ces_test_arg(L"/p"),   ces_test_arg(L"udp"),
+                                        ces_test_arg(L"/k"),     ces_test_arg(L"2048"), ces_test_arg(L"/cq"),
+                                        ces_test_arg(L"4096") };
+    ces_test_expect(ces_parse_options(static_cast<int>(depth_args.size()), depth_args.data(), &options, error.data(),
+                                      error.size()) &&
+                        options.udp_depth == 2048 && options.cq_capacity == 4096,
+                    "server UDP accepts the exact two-operations-per-slot CQ boundary");
+    depth_args[4] = ces_test_arg(L"2049");
+    error.fill(L'\0');
+    ces_test_expect(!ces_parse_options(static_cast<int>(depth_args.size()), depth_args.data(), &options, error.data(),
+                                       error.size()) &&
+                        std::wcsstr(error.data(), L"twice /k") != nullptr,
+                    "server UDP rejects a slot above CQ capacity");
+
+    std::array<wchar_t*, 8> help_depth_args{ ces_test_arg(L"server"), ces_test_arg(L"/h"), ces_test_arg(L"/p"),
+                                             ces_test_arg(L"udp"),    ces_test_arg(L"/k"), ces_test_arg(L"33"),
+                                             ces_test_arg(L"/cq"),    ces_test_arg(L"64") };
+    ces_test_expect(!ces_parse_options(static_cast<int>(help_depth_args.size()), help_depth_args.data(), &options,
+                                       error.data(), error.size()),
+                    "server help still checks UDP resource relationships");
+}
+
 static void ces_test_capacity() noexcept {
     std::size_t value = 0;
     ces_test_expect(ces_checked_product(1024, 4096, &value) && value == 4194304,
@@ -99,6 +152,7 @@ static void ces_test_notification() noexcept {
 
 int main() {
     ces_test_parser();
+    ces_test_udp_workers_and_capacity();
     ces_test_capacity();
     ces_test_progression();
     ces_test_notification();

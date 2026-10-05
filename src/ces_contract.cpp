@@ -206,11 +206,12 @@ bool ces_parse_options(int             argc,
         ces_contract_error(error, error_capacity, L"/t is available only for TCP");
         return false;
     }
-    if (options->protocol == ces_protocol::udp && saw_workers) {
-        ces_contract_error(error, error_capacity, L"/threads is available only for TCP");
+    if (options->protocol == ces_protocol::udp && saw_workers && options->worker_count > 1U) {
+        ces_contract_error(error, error_capacity, L"UDP /threads must be 0 or 1");
         return false;
     }
     if (options->protocol == ces_protocol::udp) {
+        options->worker_count = 1U;
         if (!saw_rio_buffer) {
             options->rio_buffer_bytes = CES_MAXIMUM_UDP_PAYLOAD_BYTES;
         } else if (options->rio_buffer_bytes < CES_MAXIMUM_UDP_PAYLOAD_BYTES) {

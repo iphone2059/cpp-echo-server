@@ -76,6 +76,39 @@ void ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistic
     total->receives += value->receives;
     total->sends += value->sends;
     total->bytes += value->bytes;
+    total->received_bytes += value->received_bytes;
+    total->sent_bytes += value->sent_bytes;
+    total->network_errors += value->network_errors;
+    total->rejected += value->rejected;
+}
+
+void ces_statistics_record_completion(ces_engine_statistics* statistics,
+                                      ces_engine_operation   operation,
+                                      LONG                   status,
+                                      ULONG                  bytes_transferred,
+                                      bool                   closing) noexcept {
+    ++statistics->completions;
+    if (status != ERROR_SUCCESS) {
+        if (!closing) {
+            ++statistics->network_errors;
+        }
+        return;
+    }
+    if (operation == ces_engine_operation::receive) {
+        ++statistics->receives;
+        statistics->received_bytes += bytes_transferred;
+    } else {
+        ++statistics->sends;
+        statistics->sent_bytes += bytes_transferred;
+        statistics->bytes += bytes_transferred;
+    }
+}
+
+std::uint32_t ces_accept_operation_count(std::uint32_t worker_count) noexcept {
+    constexpr std::uint32_t minimum    = 8U;
+    constexpr std::uint32_t maximum    = 128U;
+    constexpr std::uint32_t per_worker = 2U;
+    return worker_count >= maximum / per_worker ? maximum : std::max(minimum, worker_count * per_worker);
 }
 
 ces_socket_owner::ces_socket_owner() noexcept : value_(INVALID_SOCKET) {}

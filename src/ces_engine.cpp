@@ -42,8 +42,6 @@ static constexpr ULONG_PTR     ces_engine_stop_key                       = 1U;
 static constexpr ULONG_PTR     ces_engine_admission_closed_key           = 2U;
 static constexpr ULONG         ces_engine_batch_size                     = 256U;
 static constexpr std::uint32_t ces_engine_max_drain_batches              = 64U;
-static constexpr std::uint32_t ces_engine_accepts_per_worker             = 32U;
-static constexpr std::uint32_t ces_engine_max_accepts                    = 1024U;
 static constexpr std::uint32_t ces_engine_max_inline_accept_retries      = 4U;
 static constexpr ULONGLONG     ces_engine_notification_retire_timeout_ms = 5000ULL;
 
@@ -74,6 +72,7 @@ static void ces_engine_report(const wchar_t* stage, int error) noexcept {
 static void ces_engine_print_final_statistics(ces_protocol                 protocol,
                                               const ces_engine_statistics* statistics,
                                               ULONGLONG                    elapsed_milliseconds,
+                                              std::uint32_t                worker_count,
                                               std::uint32_t                terminal_count) noexcept {
     const ULONGLONG guarded_elapsed      = std::max<ULONGLONG>(elapsed_milliseconds, 1U);
     const double    elapsed_seconds      = static_cast<double>(guarded_elapsed) / 1000.0;
@@ -81,22 +80,32 @@ static void ces_engine_print_final_statistics(ces_protocol                 proto
     if (protocol == ces_protocol::tcp) {
         std::fwprintf(stdout,
                       L"final protocol=tcp elapsed_ms=%llu accepted=%llu completions=%llu receives=%llu sends=%llu "
-                      L"bytes=%llu MiB_per_sec=%.2f active=%u\n",
+                      L"bytes=%llu MiB_per_sec=%.2f active=%u workers=%u received_bytes=%llu sent_bytes=%llu "
+                      L"network_errors=%llu rejected=%llu\n",
                       static_cast<unsigned long long>(elapsed_milliseconds),
                       static_cast<unsigned long long>(statistics->accepted),
                       static_cast<unsigned long long>(statistics->completions),
                       static_cast<unsigned long long>(statistics->receives),
                       static_cast<unsigned long long>(statistics->sends),
-                      static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count);
+                      static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count,
+                      worker_count, static_cast<unsigned long long>(statistics->received_bytes),
+                      static_cast<unsigned long long>(statistics->sent_bytes),
+                      static_cast<unsigned long long>(statistics->network_errors),
+                      static_cast<unsigned long long>(statistics->rejected));
         return;
     }
     std::fwprintf(
         stdout,
         L"final protocol=udp elapsed_ms=%llu completions=%llu receives=%llu sends=%llu bytes=%llu "
-        L"MiB_per_sec=%.2f outstanding=%u\n",
+        L"MiB_per_sec=%.2f outstanding=%u workers=%u received_bytes=%llu sent_bytes=%llu network_errors=%llu "
+        L"rejected=%llu\n",
         static_cast<unsigned long long>(elapsed_milliseconds), static_cast<unsigned long long>(statistics->completions),
         static_cast<unsigned long long>(statistics->receives), static_cast<unsigned long long>(statistics->sends),
-        static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count);
+        static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count, worker_count,
+        static_cast<unsigned long long>(statistics->received_bytes),
+        static_cast<unsigned long long>(statistics->sent_bytes),
+        static_cast<unsigned long long>(statistics->network_errors),
+        static_cast<unsigned long long>(statistics->rejected));
 }
 
 static bool ces_engine_load_rio(RIO_EXTENSION_FUNCTION_TABLE* table) noexcept {
@@ -187,6 +196,7 @@ static bool ces_engine_post_receive(ces_engine_connection* connection) noexcept 
     if (connection->owner->rio->RIOReceive(connection->request_queue, &connection->buffer, 1, 0,
                                            &connection->request) == FALSE) {
         ces_engine_report(L"RIOReceive", WSAGetLastError());
+        ++connection->owner->statistics.network_errors;
         return false;
     }
     ++connection->outstanding;
@@ -206,6 +216,7 @@ static bool ces_engine_post_send(ces_engine_connection* connection) noexcept {
     if (connection->owner->rio->RIOSend(connection->request_queue, &connection->buffer, 1, 0, &connection->request) ==
         FALSE) {
         ces_engine_report(L"RIOSend", WSAGetLastError());
+        ++connection->owner->statistics.network_errors;
         return false;
     }
     ++connection->outstanding;
@@ -218,7 +229,6 @@ static bool ces_engine_post_send(ces_engine_connection* connection) noexcept {
 }
 
 static void ces_engine_process_result(ces_engine_worker* worker, const RIORESULT& result) noexcept {
-    ++worker->completion_count;
     ces_engine_request* request =
         reinterpret_cast<ces_engine_request*>(static_cast<std::uintptr_t>(result.RequestContext));
     if (request == nullptr || request->connection == nullptr || request->connection->owner != worker) {
@@ -229,6 +239,8 @@ static void ces_engine_process_result(ces_engine_worker* worker, const RIORESULT
         ces_engine_fail_fast(L"worker RIO outstanding count", ERROR_INVALID_DATA);
     }
     --connection->outstanding;
+    ces_statistics_record_completion(&worker->statistics, request->operation, result.Status, result.BytesTransferred,
+                                     connection->closing);
     if (connection->closing) {
         if (connection->outstanding == 0) {
             ces_engine_release_connection(connection);
@@ -241,7 +253,6 @@ static void ces_engine_process_result(ces_engine_worker* worker, const RIORESULT
     }
 
     if (request->operation == ces_engine_operation::receive) {
-        ++worker->receive_count;
         if (result.BytesTransferred == 0) {
             ces_engine_close_connection(connection);
             return;
@@ -254,10 +265,8 @@ static void ces_engine_process_result(ces_engine_worker* worker, const RIORESULT
         return;
     }
 
-    ++worker->send_count;
-    worker->echoed_bytes += result.BytesTransferred;
-
     if (!ces_advance_offset(connection->echo_bytes, result.BytesTransferred, &connection->send_offset)) {
+        ++worker->statistics.network_errors;
         ces_engine_close_connection(connection);
         return;
     }
@@ -300,7 +309,12 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
     ces_socket_owner accepted_owner{ operation->owner->resources->operation_sockets[operation->index].release() };
     const SOCKET     accepted = accepted_owner.get();
     operation->socket         = INVALID_SOCKET;
-    if (worker->stopping || worker->free_count == 0) {
+    if (worker->stopping) {
+        ces_engine_ack_accept(operation);
+        return;
+    }
+    if (worker->free_count == 0) {
+        ++worker->statistics.rejected;
         ces_engine_ack_accept(operation);
         return;
     }
@@ -324,6 +338,7 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
                                                                         worker->completion_queue, connection);
     if (connection->request_queue == RIO_INVALID_RQ) {
         ces_engine_report(L"RIOCreateRequestQueue(TCP)", WSAGetLastError());
+        ++worker->statistics.network_errors;
         connection->active                         = false;
         worker->free_indices[worker->free_count++] = index;
         ces_engine_connection_socket_close(connection);
@@ -331,7 +346,7 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
         return;
     }
     ++worker->active_count;
-    ++worker->accepted_count;
+    ++worker->statistics.accepted;
     if (!ces_engine_post_receive(connection)) {
         ces_engine_close_connection(connection);
     }
@@ -385,6 +400,7 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
             ces_engine_take_socket(worker, operation);
         } else if (ok == FALSE && error != WAIT_TIMEOUT) {
             ces_engine_report(L"GetQueuedCompletionStatus(worker)", static_cast<int>(error));
+            ++worker->statistics.network_errors;
             worker->failed->store(true, std::memory_order_release);
             ces_engine_stop_worker(worker);
         } else if (!(ok == FALSE && error == WAIT_TIMEOUT && overlapped == nullptr)) {
@@ -551,12 +567,13 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
         }
     }
     if (worker->options != nullptr && worker->options->stats) {
-        std::fwprintf(
-            stdout, L"[worker %u] accepted=%llu completions=%llu receives=%llu sends=%llu bytes=%llu active=%u\n",
-            worker->worker_index, static_cast<unsigned long long>(worker->accepted_count),
-            static_cast<unsigned long long>(worker->completion_count),
-            static_cast<unsigned long long>(worker->receive_count), static_cast<unsigned long long>(worker->send_count),
-            static_cast<unsigned long long>(worker->echoed_bytes), worker->active_count);
+        std::fwprintf(stdout,
+                      L"[worker %u] accepted=%llu completions=%llu receives=%llu sends=%llu bytes=%llu active=%u\n",
+                      worker->worker_index, static_cast<unsigned long long>(worker->statistics.accepted),
+                      static_cast<unsigned long long>(worker->statistics.completions),
+                      static_cast<unsigned long long>(worker->statistics.receives),
+                      static_cast<unsigned long long>(worker->statistics.sends),
+                      static_cast<unsigned long long>(worker->statistics.bytes), worker->active_count);
     }
     worker->resources->completion_queue.reset();
     worker->completion_queue = RIO_INVALID_CQ;
@@ -609,6 +626,7 @@ static bool ces_engine_post_accept(ces_engine_acceptor* acceptor, ces_engine_acc
         acceptor->resources->operation_sockets[operation->index].reset(operation->socket);
         if (operation->socket == INVALID_SOCKET) {
             ces_engine_report(L"WSASocketW(accepted RIO socket)", WSAGetLastError());
+            ++acceptor->network_errors;
             return false;
         }
         DWORD received      = 0;
@@ -625,6 +643,7 @@ static bool ces_engine_post_accept(ces_engine_acceptor* acceptor, ces_engine_acc
         }
         operation->state = ces_accept_state::idle;
         ces_engine_accept_socket_close(operation);
+        ++acceptor->network_errors;
         if (ces_engine_accept_error_is_recoverable(error)) {
             continue;
         }
@@ -704,6 +723,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
                 if (acceptor->stopping || acceptor->failed->load(std::memory_order_acquire)) {
                     continue;
                 }
+                ++acceptor->network_errors;
                 if (ces_engine_accept_error_is_recoverable(wait_error)) {
                     if (!ces_engine_post_accept(acceptor, operation)) {
                         acceptor->failed->store(true, std::memory_order_release);
@@ -725,6 +745,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
             if (setsockopt(operation->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                            reinterpret_cast<const char*>(&acceptor->listener), sizeof(acceptor->listener)) != 0 ||
                 !ces_engine_configure_socket(operation->socket, acceptor->options, true)) {
+                ++acceptor->network_errors;
                 operation->state = ces_accept_state::idle;
                 ces_engine_accept_socket_close(operation);
                 acceptor->failed->store(true, std::memory_order_release);
@@ -756,6 +777,7 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
         }
         if (ok == FALSE && wait_error != WAIT_TIMEOUT) {
             ces_engine_report(L"GetQueuedCompletionStatus(acceptor)", static_cast<int>(wait_error));
+            ++acceptor->network_errors;
             acceptor->failed->store(true, std::memory_order_release);
             ces_engine_stop_acceptor(acceptor);
         }
@@ -783,9 +805,11 @@ static bool ces_engine_acceptor_initialize(ces_engine_acceptor*                a
     resources->port.reset(acceptor->port);
     if (acceptor->listener == INVALID_SOCKET || acceptor->port == nullptr) {
         ces_engine_report(L"TCP listener/IOCP creation", WSAGetLastError());
+        ++acceptor->network_errors;
         return false;
     }
     if (!ces_engine_configure_socket(acceptor->listener, options, true)) {
+        ++acceptor->network_errors;
         return false;
     }
     SOCKADDR_IN address{};
@@ -795,10 +819,12 @@ static bool ces_engine_acceptor_initialize(ces_engine_acceptor*                a
     if (bind(acceptor->listener, reinterpret_cast<const SOCKADDR*>(&address), sizeof(address)) != 0 ||
         listen(acceptor->listener, SOMAXCONN) != 0) {
         ces_engine_report(L"bind/listen", WSAGetLastError());
+        ++acceptor->network_errors;
         return false;
     }
     if (CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptor->listener), acceptor->port, 0, 1) != acceptor->port) {
         ces_engine_report(L"CreateIoCompletionPort(listener association)", static_cast<int>(GetLastError()));
+        ++acceptor->network_errors;
         return false;
     }
     GUID  accept_identifier  = WSAID_ACCEPTEX;
@@ -808,6 +834,7 @@ static bool ces_engine_acceptor_initialize(ces_engine_acceptor*                a
                  &acceptor->accept_ex, sizeof(acceptor->accept_ex), &bytes, nullptr, nullptr) != 0 ||
         acceptor->accept_ex == nullptr) {
         ces_engine_report(L"SIO_GET_EXTENSION_FUNCTION_POINTER(AcceptEx)", WSAGetLastError());
+        ++acceptor->network_errors;
         return false;
     }
     bytes = 0;
@@ -816,9 +843,10 @@ static bool ces_engine_acceptor_initialize(ces_engine_acceptor*                a
                  &bytes, nullptr, nullptr) != 0 ||
         acceptor->get_accept_addresses == nullptr) {
         ces_engine_report(L"SIO_GET_EXTENSION_FUNCTION_POINTER(GetAcceptExSockaddrs)", WSAGetLastError());
+        ++acceptor->network_errors;
         return false;
     }
-    acceptor->operation_count = std::min(worker_count * ces_engine_accepts_per_worker, ces_engine_max_accepts);
+    acceptor->operation_count = ces_accept_operation_count(worker_count);
     acceptor->operations      = static_cast<ces_engine_accept_operation*>(
         HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ces_engine_accept_operation) * acceptor->operation_count));
     resources->operations.reset(acceptor->operations);
@@ -927,15 +955,13 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         }
     }
     ces_engine_statistics statistics{};
+    statistics.network_errors = acceptor.network_errors;
     for (std::uint32_t index = 0; index < initialized; ++index) {
         ces_engine_worker_destroy(&workers[index]);
-        const ces_engine_statistics worker_statistics{ workers[index].accepted_count, workers[index].completion_count,
-                                                       workers[index].receive_count, workers[index].send_count,
-                                                       workers[index].echoed_bytes };
-        ces_statistics_add(&statistics, &worker_statistics);
+        ces_statistics_add(&statistics, &workers[index].statistics);
     }
     if (options->stats) {
-        ces_engine_print_final_statistics(ces_protocol::tcp, &statistics, GetTickCount64() - start, 0);
+        ces_engine_print_final_statistics(ces_protocol::tcp, &statistics, GetTickCount64() - start, worker_count, 0);
     }
     return failed.load(std::memory_order_acquire) ? ces_exit_code::network : ces_exit_code::success;
 }
@@ -990,9 +1016,15 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     bool                       failed      = false;
     ces_engine_statistics      statistics{};
 
-    if (socket_value == INVALID_SOCKET || port == nullptr || memory == nullptr || slots == nullptr ||
-        !ces_engine_configure_socket(socket_value, options, false)) {
+    if (socket_value == INVALID_SOCKET || port == nullptr || memory == nullptr || slots == nullptr) {
         ces_engine_report(L"UDP runtime allocation", WSAGetLastError());
+        if (socket_value == INVALID_SOCKET) {
+            ++statistics.network_errors;
+        }
+        failed = true;
+    }
+    if (!failed && !ces_engine_configure_socket(socket_value, options, false)) {
+        ++statistics.network_errors;
         failed = true;
     }
     if (!failed) {
@@ -1002,6 +1034,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         address.sin_port        = htons(options->port);
         if (bind(socket_value, reinterpret_cast<const SOCKADDR*>(&address), sizeof(address)) != 0) {
             ces_engine_report(L"bind(UDP)", WSAGetLastError());
+            ++statistics.network_errors;
             failed = true;
         }
     }
@@ -1017,6 +1050,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         completion_queue_owner.reset(rio, completion_queue);
         if (registration == RIO_INVALID_BUFFERID || completion_queue == RIO_INVALID_CQ) {
             ces_engine_report(L"UDP RIO buffer/CQ creation", WSAGetLastError());
+            ++statistics.network_errors;
             failed = true;
         }
     }
@@ -1025,6 +1059,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                                    completion_queue, completion_queue, slots);
         if (request_queue == RIO_INVALID_RQ) {
             ces_engine_report(L"RIOCreateRequestQueue(UDP)", WSAGetLastError());
+            ++statistics.network_errors;
             failed = true;
         }
     }
@@ -1038,6 +1073,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             if (rio->RIOReceiveEx(request_queue, &slots[index].payload, 1, nullptr, &slots[index].remote_address,
                                   nullptr, nullptr, 0, &slots[index]) == FALSE) {
                 ces_engine_report(L"RIOReceiveEx(UDP)", WSAGetLastError());
+                ++statistics.network_errors;
                 slots[index].outstanding = false;
                 failed                   = true;
                 break;
@@ -1093,15 +1129,8 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                     }
                     slot->outstanding = false;
                     --outstanding;
-                    ++statistics.completions;
-                    if (slot->operation == ces_engine_operation::receive) {
-                        ++statistics.receives;
-                    } else {
-                        ++statistics.sends;
-                        if (results[result_index].Status == ERROR_SUCCESS) {
-                            statistics.bytes += results[result_index].BytesTransferred;
-                        }
-                    }
+                    ces_statistics_record_completion(&statistics, slot->operation, results[result_index].Status,
+                                                     results[result_index].BytesTransferred, closing);
                     if (closing) {
                         continue;
                     }
@@ -1134,6 +1163,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                     }
                     if (posted == FALSE) {
                         ces_engine_report(L"UDP RIO repost", WSAGetLastError());
+                        ++statistics.network_errors;
                         failed  = true;
                         closing = true;
                         ces_engine_owned_socket_close(&socket_owner, &socket_value);
@@ -1188,7 +1218,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }
     if (options->stats) {
-        ces_engine_print_final_statistics(ces_protocol::udp, &statistics, GetTickCount64() - start, outstanding);
+        ces_engine_print_final_statistics(ces_protocol::udp, &statistics, GetTickCount64() - start, 1U, outstanding);
     }
     completion_queue_owner.reset();
     completion_queue = RIO_INVALID_CQ;

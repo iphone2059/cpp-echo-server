@@ -49,6 +49,21 @@ function Wait-TcpReady {
     throw 'TCP server did not become ready'
 }
 
+function Get-FinalStatistics {
+    param([string] $Text, [string] $Protocol)
+    $lines = @($Text -split '\r?\n' | Where-Object { $_ -match "^final protocol=$Protocol " })
+    if ($lines.Count -ne 1) { throw "expected one $Protocol final statistics line: $Text" }
+    $fields = @{}
+    foreach ($match in [regex]::Matches($lines[0], '(?:^| )([a-z_]+)=([0-9]+)(?= |$)')) {
+        $fields[$match.Groups[1].Value] = [UInt64]::Parse($match.Groups[2].Value)
+    }
+    foreach ($name in @('workers', 'completions', 'receives', 'sends', 'bytes', 'received_bytes', 'sent_bytes',
+        'network_errors', 'rejected')) {
+        if (-not $fields.ContainsKey($name)) { throw "missing $name in final statistics: $Text" }
+    }
+    return $fields
+}
+
 $tcpPort = Get-FreeTcpPort
 $tcpOutputPath = [System.IO.Path]::GetTempFileName()
 $tcp = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $tcpPort, '/w', '2', '/q',
@@ -84,10 +99,79 @@ try {
     if ($tcpText -notmatch 'final protocol=tcp .*accepted=[1-9][0-9]* .*bytes=[1-9][0-9]* .*active=0') {
         throw "TCP final statistics are missing or incomplete: $tcpText"
     }
+    $tcpStats = Get-FinalStatistics -Text $tcpText -Protocol 'tcp'
+    if ($tcpStats.workers -ne 2 -or $tcpStats.received_bytes -ne $payload.Length -or
+        $tcpStats.sent_bytes -ne $payload.Length -or $tcpStats.bytes -ne $tcpStats.sent_bytes -or
+        $tcpStats.network_errors -ne 0 -or $tcpStats.rejected -ne 0 -or
+        $tcpStats.completions -lt ($tcpStats.receives + $tcpStats.sends)) {
+        throw "TCP native byte counts or clean-stop accounting are incorrect: $tcpText"
+    }
 } finally {
     if (-not $tcp.HasExited) { $tcp.Kill($true) }
     $tcp.Dispose()
     Remove-Item -LiteralPath $tcpOutputPath -Force -ErrorAction SilentlyContinue
+}
+
+$capacityPort = Get-FreeTcpPort
+$capacityOutputPath = [System.IO.Path]::GetTempFileName()
+$capacityServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $capacityPort, '/w', '3',
+    '/q', '/threads', '1', '/cq', '64', '/memory', '16777216', '/stats') `
+    -RedirectStandardOutput $capacityOutputPath -PassThru -WindowStyle Hidden
+$capacityClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
+$capacityRejectedClient = $null
+try {
+    # The first retained client is also the readiness probe, so all 32 slots are deterministic.
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    for ($index = 0; $index -lt 32; $index++) {
+        $connection = $null
+        while ($null -eq $connection) {
+            $candidate = [System.Net.Sockets.TcpClient]::new()
+            try {
+                $candidate.Connect([System.Net.IPAddress]::Loopback, $capacityPort)
+                $connection = $candidate
+            } catch [System.Net.Sockets.SocketException] {
+                $candidate.Dispose()
+                if ($index -ne 0 -or $capacityServer.HasExited -or [DateTime]::UtcNow -ge $readyDeadline) { throw }
+                Start-Sleep -Milliseconds 20
+            }
+        }
+        $capacityClients.Add($connection)
+        $connection.ReceiveTimeout = 1000
+        $stream = $connection.GetStream()
+        $stream.WriteByte(42)
+        if ($stream.ReadByte() -ne 42) { throw "capacity connection $index failed its echo" }
+    }
+    $capacityRejectedClient = [System.Net.Sockets.TcpClient]::new()
+    $capacityRejectedClient.ReceiveTimeout = 1000
+    $capacityRejectedClient.Connect([System.Net.IPAddress]::Loopback, $capacityPort)
+    try {
+        if ($capacityRejectedClient.GetStream().ReadByte() -ne -1) {
+            throw 'server admitted a TCP connection beyond its CQ capacity'
+        }
+    } catch [System.IO.IOException] {
+        if ($_.Exception.InnerException -isnot [System.Net.Sockets.SocketException] -or
+            $_.Exception.InnerException.SocketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) { throw }
+    }
+    $stream = $capacityClients[0].GetStream()
+    $stream.WriteByte(43)
+    if ($stream.ReadByte() -ne 43) { throw 'capacity rejection stopped an existing connection' }
+    $capacityServer.WaitForExit(7000) | Out-Null
+    if (-not $capacityServer.HasExited -or $capacityServer.ExitCode -ne 0) {
+        throw 'capacity-limited TCP server did not stop cleanly'
+    }
+    $capacityText = Get-Content -LiteralPath $capacityOutputPath -Raw
+    $capacityStats = Get-FinalStatistics -Text $capacityText -Protocol 'tcp'
+    if ($capacityStats.accepted -ne 32 -or $capacityStats.rejected -ne 1 -or $capacityStats.network_errors -ne 0 -or
+        $capacityStats.received_bytes -ne 33 -or $capacityStats.sent_bytes -ne 33 -or
+        $capacityStats.bytes -ne 33 -or $capacityStats.workers -ne 1 -or $capacityStats.active -ne 0) {
+        throw "capacity rejection or controlled-stop statistics are incorrect: $capacityText"
+    }
+} finally {
+    foreach ($connection in $capacityClients) { $connection.Dispose() }
+    if ($null -ne $capacityRejectedClient) { $capacityRejectedClient.Dispose() }
+    if (-not $capacityServer.HasExited) { $capacityServer.Kill($true) }
+    $capacityServer.Dispose()
+    Remove-Item -LiteralPath $capacityOutputPath -Force -ErrorAction SilentlyContinue
 }
 
 $timeoutPort = Get-FreeTcpPort
@@ -192,6 +276,13 @@ try {
     $udpText = Get-Content -LiteralPath $udpOutputPath -Raw
     if ($udpText -notmatch 'final protocol=udp .*completions=[1-9][0-9]* .*receives=[1-9][0-9]* .*sends=3 .*bytes=65508 .*outstanding=0') {
         throw "UDP final statistics are missing or incomplete: $udpText"
+    }
+    $udpStats = Get-FinalStatistics -Text $udpText -Protocol 'udp'
+    if ($udpStats.workers -ne 1 -or $udpStats.receives -ne 3 -or $udpStats.sends -ne 3 -or
+        $udpStats.received_bytes -ne 65508 -or $udpStats.sent_bytes -ne 65508 -or
+        $udpStats.bytes -ne $udpStats.sent_bytes -or $udpStats.network_errors -ne 0 -or $udpStats.rejected -ne 0 -or
+        $udpStats.completions -le ($udpStats.receives + $udpStats.sends)) {
+        throw "UDP zero-datagram byte counts or cancelled-completion accounting are incorrect: $udpText"
     }
 } finally {
     if (-not $udp.HasExited) { $udp.Kill($true) }
