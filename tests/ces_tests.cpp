@@ -45,6 +45,15 @@ static void ces_test_parser() noexcept {
                         std::wcsstr(error.data(), L"protocol-option") != nullptr,
                     "server rejects UDP depth for TCP");
 
+    wchar_t                 surrogate[] = { static_cast<wchar_t>(0xD800), L'\0' };
+    std::array<wchar_t*, 5> malformed{ ces_test_arg(L"server"), ces_test_arg(L"/p"), ces_test_arg(L"tcp"),
+                                       ces_test_arg(L"/b"), surrogate };
+    error.fill(L'\0');
+    ces_test_expect(!ces_parse_options(static_cast<int>(malformed.size()), malformed.data(), &invalid, error.data(),
+                                       error.size()) &&
+                        std::wcscmp(error.data(), L"invalid-utf16") == 0,
+                    "server validates UTF-16 before interpreting a switch value");
+
     std::array<wchar_t*, 3> unknown_args{ ces_test_arg(L"server"), ces_test_arg(L"/foo"), ces_test_arg(L"bar") };
     error.fill(L'\0');
     ces_test_expect(!ces_parse_options(static_cast<int>(unknown_args.size()), unknown_args.data(), &invalid,

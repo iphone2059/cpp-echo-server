@@ -51,6 +51,21 @@ static void ces_contract_error(wchar_t* output, std::size_t capacity, const wcha
     }
 }
 
+static bool ces_contract_valid_utf16(std::wstring_view text) noexcept {
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const wchar_t character = text[index];
+        if (character >= 0xD800 && character <= 0xDBFF) {
+            ++index;
+            if (index == text.size() || text[index] < 0xDC00 || text[index] > 0xDFFF) {
+                return false;
+            }
+        } else if (character >= 0xDC00 && character <= 0xDFFF) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool ces_contract_number(std::wstring_view text, std::uint64_t* value) noexcept {
     if (text.empty() || value == nullptr) {
         return false;
@@ -120,6 +135,10 @@ bool ces_parse_options(int             argc,
 
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view token{ argv[index] };
+        if (!ces_contract_valid_utf16(token)) {
+            ces_contract_error(error, error_capacity, L"invalid-utf16");
+            return false;
+        }
         if (!ces_contract_is_switch(token)) {
             ces_contract_error(error, error_capacity, L"unexpected-target");
             return false;
@@ -155,6 +174,10 @@ bool ces_parse_options(int             argc,
         std::wstring_view value{};
         if (!ces_contract_value(argc, argv, &index, inline_value, &value)) {
             ces_contract_error(error, error_capacity, L"missing-value");
+            return false;
+        }
+        if (!ces_contract_valid_utf16(value)) {
+            ces_contract_error(error, error_capacity, L"invalid-utf16");
             return false;
         }
         std::uint64_t number = 0;
