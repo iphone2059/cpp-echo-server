@@ -176,6 +176,9 @@ static void ces_engine_release_connection(ces_engine_connection* connection) noe
     worker->free_indices[worker->free_count] = connection->index;
     ++worker->free_count;
     --worker->active_count;
+    // The slot reservation made by the acceptor is returned exactly here, once the connection has
+    // released its RQ and socket, and on the handoff rollback paths in ces_engine_take_socket.
+    ces_worker_release_admission_credit(worker);
 }
 
 static void ces_engine_close_connection(ces_engine_connection* connection) noexcept {
@@ -310,11 +313,16 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
     const SOCKET     accepted = accepted_owner.get();
     operation->socket         = INVALID_SOCKET;
     if (worker->stopping) {
+        ces_worker_release_admission_credit(worker);
         ces_engine_ack_accept(operation);
         return;
     }
     if (worker->free_count == 0) {
+        // Defensive: the acceptor reserves a slot before publishing a handoff, so this path only
+        // runs if the reservation and the worker pool ever disagree. Return the reservation rather
+        // than leaking it, and keep counting the rejection.
         ++worker->statistics.rejected;
+        ces_worker_release_admission_credit(worker);
         ces_engine_ack_accept(operation);
         return;
     }
@@ -341,6 +349,7 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
         ++worker->statistics.network_errors;
         connection->active                         = false;
         worker->free_indices[worker->free_count++] = index;
+        ces_worker_release_admission_credit(worker);
         ces_engine_connection_socket_close(connection);
         ces_engine_ack_accept(operation);
         return;
@@ -488,6 +497,7 @@ static bool ces_engine_worker_initialize(ces_engine_worker*                  wor
         ces_engine_report(L"worker RIO CQ capacity", ERROR_INSUFFICIENT_BUFFER);
         return false;
     }
+    worker->admission_credit.store(worker->slot_count, std::memory_order_relaxed);
     std::size_t arena_bytes = 0;
     if (!ces_checked_arena_bytes(worker->slot_count, worker->stride, memory_share, &arena_bytes) ||
         arena_bytes > std::numeric_limits<DWORD>::max()) {
@@ -562,7 +572,9 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
     }
     if (had_ready_worker) {
         if (!worker->stopping || !worker->admission_closed || worker->active_count != 0 ||
-            worker->free_count != worker->slot_count || worker->notification_armed || worker->timers.size != 0) {
+            worker->free_count != worker->slot_count ||
+            worker->admission_credit.load(std::memory_order_relaxed) != worker->slot_count ||
+            worker->notification_armed || worker->timers.size != 0) {
             ces_engine_fail_fast(L"worker release precondition", ERROR_INVALID_STATE);
         }
     }
@@ -767,9 +779,23 @@ static DWORD WINAPI ces_engine_acceptor_thread(void* parameter) noexcept {
                 ces_engine_stop_acceptor(acceptor);
                 continue;
             }
-            operation->state               = ces_accept_state::transit;
-            ces_engine_worker* worker      = &acceptor->workers[acceptor->next_worker++ % acceptor->worker_count];
-            const ULONG_PTR    handoff_key = static_cast<ULONG_PTR>(reinterpret_cast<std::uintptr_t>(operation));
+            // Reserve a slot on the target worker before publishing the handoff, so a connection is
+            // never accepted and then rejected while another worker still has capacity.
+            ces_engine_worker* worker = ces_acceptor_select_worker(acceptor);
+            if (worker == nullptr) {
+                // Every worker has reserved all of its slots, so the server really is at capacity:
+                // withdraw this accept socket and repost the accept slot.
+                ++acceptor->rejected;
+                operation->state = ces_accept_state::idle;
+                ces_engine_accept_socket_close(operation);
+                if (!ces_engine_post_accept(acceptor, operation)) {
+                    acceptor->failed->store(true, std::memory_order_release);
+                    ces_engine_stop_acceptor(acceptor);
+                }
+                continue;
+            }
+            operation->state            = ces_accept_state::transit;
+            const ULONG_PTR handoff_key = static_cast<ULONG_PTR>(reinterpret_cast<std::uintptr_t>(operation));
             if (PostQueuedCompletionStatus(worker->port, 0, handoff_key, nullptr) == FALSE) {
                 ces_engine_fail_fast(L"PostQueuedCompletionStatus(accept handoff)", static_cast<int>(GetLastError()));
             }
@@ -956,6 +982,7 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     }
     ces_engine_statistics statistics{};
     statistics.network_errors = acceptor.network_errors;
+    statistics.rejected       = acceptor.rejected;
     for (std::uint32_t index = 0; index < initialized; ++index) {
         ces_engine_worker_destroy(&workers[index]);
         ces_statistics_add(&statistics, &workers[index].statistics);

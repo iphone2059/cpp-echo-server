@@ -267,6 +267,45 @@ static void ces_engine_test_accept_capacity() noexcept {
                            "server accept pool caps at 128 without overflowing the worker product");
 }
 
+static void ces_engine_test_admission_credit() noexcept {
+    ces_engine_worker   workers[2]{};
+    ces_engine_acceptor acceptor{};
+    acceptor.workers      = workers;
+    acceptor.worker_count = 2U;
+    for (ces_engine_worker& worker : workers) {
+        worker.slot_count = 2U;
+        worker.admission_credit.store(2U, std::memory_order_relaxed);
+    }
+
+    ces_engine_test_expect(
+        ces_acceptor_select_worker(&acceptor) == &workers[0] && ces_acceptor_select_worker(&acceptor) == &workers[1],
+        "server admission dispatch rotates across workers that hold credit");
+
+    workers[0].admission_credit.store(0U, std::memory_order_relaxed);
+    acceptor.next_worker = 0U;
+    ces_engine_test_expect(ces_acceptor_select_worker(&acceptor) == &workers[1],
+                           "server admission dispatch skips a worker without credit instead of rejecting");
+
+    workers[1].admission_credit.store(0U, std::memory_order_relaxed);
+    acceptor.next_worker = 0U;
+    ces_engine_test_expect(ces_acceptor_select_worker(&acceptor) == nullptr,
+                           "server admission dispatch reports a fully reserved server");
+
+    ces_engine_test_expect(!ces_worker_try_reserve_admission(&workers[0]) &&
+                               workers[0].admission_credit.load(std::memory_order_relaxed) == 0U,
+                           "server admission reservation refuses an exhausted worker");
+
+    workers[0].admission_credit.store(1U, std::memory_order_relaxed);
+    ces_engine_test_expect(ces_worker_try_reserve_admission(&workers[0]) &&
+                               workers[0].admission_credit.load(std::memory_order_relaxed) == 0U &&
+                               !ces_worker_try_reserve_admission(&workers[0]),
+                           "server admission reservation consumes exactly one credit");
+
+    ces_worker_release_admission_credit(&workers[0]);
+    ces_engine_test_expect(workers[0].admission_credit.load(std::memory_order_relaxed) == 1U,
+                           "server admission release returns exactly one credit");
+}
+
 int main() {
     ces_engine_test_lifecycle();
     ces_engine_test_owners();
@@ -275,6 +314,7 @@ int main() {
     ces_engine_test_statistics();
     ces_engine_test_completion_statistics();
     ces_engine_test_accept_capacity();
+    ces_engine_test_admission_credit();
     std::printf("server_engine_failures=%d\n", ces_engine_test_failures);
     return ces_engine_test_failures == 0 ? 0 : 1;
 }

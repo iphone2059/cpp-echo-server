@@ -119,6 +119,9 @@ struct ces_engine_worker {
     std::uint32_t                       slot_count;
     std::uint32_t                       free_count;
     std::uint32_t                       active_count;
+    // Cross-thread admission credit: the acceptor reserves one unit before publishing a handoff,
+    // and the worker returns it when the connection ends or the handoff is rolled back.
+    std::atomic<std::uint32_t>          admission_credit;
     std::uint32_t                       stride;
     std::uint32_t                       worker_index;
     ces_engine_statistics               statistics;
@@ -144,6 +147,7 @@ struct ces_engine_acceptor {
     std::uint32_t                       operation_count;
     std::uint32_t                       next_worker;
     std::uint64_t                       network_errors;
+    std::uint64_t                       rejected;
     bool                                stopping;
 };
 
@@ -295,26 +299,29 @@ class ces_engine_acceptor_resources {
     std::unique_ptr<ces_socket_owner[]> operation_sockets;
 };
 
-[[noreturn]] void ces_engine_fail_fast(const wchar_t* stage, int error) noexcept;
-void              ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept;
-ULONG             ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept;
-void              ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept;
-void              ces_statistics_record_completion(ces_engine_statistics* statistics,
-                                                   ces_engine_operation   operation,
-                                                   LONG                   status,
-                                                   ULONG                  bytes_transferred,
-                                                   bool                   closing) noexcept;
-std::uint32_t     ces_accept_operation_count(std::uint32_t worker_count) noexcept;
-bool              ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept;
-bool              ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept;
-bool              ces_notification_packet_matches(ULONG_PTR         key,
-                                                  const OVERLAPPED* overlapped,
-                                                  ULONG_PTR         expected_key,
-                                                  const OVERLAPPED* expected_overlapped) noexcept;
-bool              ces_timer_initialize(ces_timer_heap* heap,
-                                       ces_timer_node* nodes,
-                                       std::uint32_t*  positions,
-                                       std::uint32_t   capacity) noexcept;
+[[noreturn]] void  ces_engine_fail_fast(const wchar_t* stage, int error) noexcept;
+void               ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept;
+ULONG              ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept;
+void               ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept;
+void               ces_statistics_record_completion(ces_engine_statistics* statistics,
+                                                    ces_engine_operation   operation,
+                                                    LONG                   status,
+                                                    ULONG                  bytes_transferred,
+                                                    bool                   closing) noexcept;
+std::uint32_t      ces_accept_operation_count(std::uint32_t worker_count) noexcept;
+bool               ces_worker_try_reserve_admission(ces_engine_worker* worker) noexcept;
+void               ces_worker_release_admission_credit(ces_engine_worker* worker) noexcept;
+ces_engine_worker* ces_acceptor_select_worker(ces_engine_acceptor* acceptor) noexcept;
+bool               ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept;
+bool               ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept;
+bool               ces_notification_packet_matches(ULONG_PTR         key,
+                                                   const OVERLAPPED* overlapped,
+                                                   ULONG_PTR         expected_key,
+                                                   const OVERLAPPED* expected_overlapped) noexcept;
+bool               ces_timer_initialize(ces_timer_heap* heap,
+                                        ces_timer_node* nodes,
+                                        std::uint32_t*  positions,
+                                        std::uint32_t   capacity) noexcept;
 bool  ces_timer_insert_or_update(ces_timer_heap* heap, std::uint32_t connection_index, ULONGLONG deadline) noexcept;
 bool  ces_timer_remove(ces_timer_heap* heap, std::uint32_t connection_index) noexcept;
 bool  ces_timer_pop_expired(ces_timer_heap* heap, ULONGLONG now, std::uint32_t* connection_index) noexcept;

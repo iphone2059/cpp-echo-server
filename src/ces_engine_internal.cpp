@@ -111,6 +111,48 @@ std::uint32_t ces_accept_operation_count(std::uint32_t worker_count) noexcept {
     return worker_count >= maximum / per_worker ? maximum : std::max(minimum, worker_count * per_worker);
 }
 
+bool ces_worker_try_reserve_admission(ces_engine_worker* worker) noexcept {
+    if (worker == nullptr) {
+        return false;
+    }
+    // A load-then-handoff would overbook when several AcceptEx completions arrive back to back, so
+    // the reservation must be a compare-exchange that consumes exactly one credit.
+    std::uint32_t credit = worker->admission_credit.load(std::memory_order_relaxed);
+    while (credit != 0U) {
+        if (worker->admission_credit.compare_exchange_weak(credit, credit - 1U, std::memory_order_acquire,
+                                                           std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ces_worker_release_admission_credit(ces_engine_worker* worker) noexcept {
+    if (worker == nullptr) {
+        return;
+    }
+    const std::uint32_t previous = worker->admission_credit.fetch_add(1U, std::memory_order_release);
+    if (previous >= worker->slot_count) {
+        // Returning more credit than the worker ever owned means a reservation was released twice;
+        // that would let the acceptor overbook the worker later.
+        ces_engine_fail_fast(L"worker admission credit", ERROR_INVALID_STATE);
+    }
+}
+
+ces_engine_worker* ces_acceptor_select_worker(ces_engine_acceptor* acceptor) noexcept {
+    if (acceptor == nullptr || acceptor->workers == nullptr || acceptor->worker_count == 0U) {
+        return nullptr;
+    }
+    for (std::uint32_t offset = 0; offset < acceptor->worker_count; ++offset) {
+        const std::uint32_t index = (acceptor->next_worker + offset) % acceptor->worker_count;
+        if (ces_worker_try_reserve_admission(&acceptor->workers[index])) {
+            acceptor->next_worker = (index + 1U) % acceptor->worker_count;
+            return &acceptor->workers[index];
+        }
+    }
+    return nullptr;
+}
+
 ces_socket_owner::ces_socket_owner() noexcept : value_(INVALID_SOCKET) {}
 
 ces_socket_owner::ces_socket_owner(SOCKET value) noexcept : value_(value) {}
