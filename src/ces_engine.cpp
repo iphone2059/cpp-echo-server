@@ -138,8 +138,12 @@ static bool ces_engine_configure_socket(SOCKET socket_value, const ces_options* 
 }
 
 static void ces_engine_arm(ces_engine_worker* worker) noexcept {
-    // The OVERLAPPED reset stays in the production wrapper: it is not part of the transaction a fake
-    // provider drives.
+    // Ownership check first: a still-armed notification may own the dedicated OVERLAPPED, so the
+    // wrapper refuses before it touches that storage. The shared transaction keeps its own check as a
+    // second line of defence.
+    if (worker->notification_armed) {
+        ces_engine_fail_fast(L"duplicate worker RIONotify", ERROR_INVALID_STATE);
+    }
     std::memset(&worker->notification_overlapped, 0, sizeof(worker->notification_overlapped));
     ces_notification_arm(worker->rio, worker->completion_queue, &worker->notification_armed, &worker->notify_arms,
                          L"RIONotify(worker)");
@@ -992,6 +996,10 @@ static void ces_engine_udp_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                OVERLAPPED*                         overlapped,
                                bool*                               armed,
                                std::uint64_t*                      arm_count) noexcept {
+    // Ownership check first, then the OVERLAPPED reset: the shared transaction repeats the check.
+    if (*armed) {
+        ces_engine_fail_fast(L"duplicate UDP RIONotify", ERROR_INVALID_STATE);
+    }
     std::memset(overlapped, 0, sizeof(*overlapped));
     ces_notification_arm(rio, queue, armed, arm_count, L"RIONotify(UDP)");
 }

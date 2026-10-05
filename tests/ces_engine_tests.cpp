@@ -94,6 +94,36 @@ static void WINAPI ces_engine_test_rio_deregister_buffer(RIO_BUFFERID buffer) no
     ces_engine_test_rio_deregistered_id = buffer;
 }
 
+// Fake RIONotify provider: the production transaction reaches the provider through the function
+// table, so a stub table exercises the real precondition, status classification and arm accounting
+// without a socket, a port or a completion queue.
+static int           ces_engine_test_notify_result = ERROR_SUCCESS;
+static std::uint32_t ces_engine_test_notify_calls  = 0;
+static RIO_CQ        ces_engine_test_notify_queue  = RIO_INVALID_CQ;
+
+static int WINAPI ces_engine_test_rio_notify(RIO_CQ completion_queue) noexcept {
+    ++ces_engine_test_notify_calls;
+    ces_engine_test_notify_queue = completion_queue;
+    return ces_engine_test_notify_result;
+}
+
+static void ces_engine_test_notification_provider() noexcept {
+    RIO_EXTENSION_FUNCTION_TABLE table{};
+    table.RIONotify    = &ces_engine_test_rio_notify;
+    const RIO_CQ queue = reinterpret_cast<RIO_CQ>(static_cast<std::uintptr_t>(0x1234U));
+
+    ces_engine_test_notify_result = ERROR_SUCCESS;
+    ces_engine_test_notify_calls  = 0;
+    ces_engine_test_notify_queue  = RIO_INVALID_CQ;
+
+    bool          armed = false;
+    std::uint64_t arms  = 0;
+    ces_notification_arm(&table, queue, &armed, &arms, L"RIONotify(server test)");
+    ces_engine_test_expect(ces_engine_test_notify_calls == 1 && ces_engine_test_notify_queue == queue,
+                           "server notification seam calls the provider with the completion queue");
+    ces_engine_test_expect(armed && arms == 1U, "server notification seam records one successful arm");
+}
+
 static void ces_engine_test_rio_owners() noexcept {
     RIO_EXTENSION_FUNCTION_TABLE table{};
     table.RIOCloseCompletionQueue = &ces_engine_test_rio_close_completion_queue;
@@ -365,6 +395,7 @@ int main() {
     ces_engine_test_lifecycle();
     ces_engine_test_owners();
     ces_engine_test_rio_owners();
+    ces_engine_test_notification_provider();
     ces_engine_test_timer();
     ces_engine_test_timer_model();
     ces_engine_test_statistics();
