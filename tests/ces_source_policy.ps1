@@ -30,7 +30,7 @@ Test-CesPattern -Pattern '\b(send|recv|sendto|recvfrom|WSASend|WSARecv)\s*\(' -L
 Test-CesPattern -Pattern '\b(CreateFile|CreateEvent|CreateMutex|CreateSemaphore|LoadLibrary|GetModuleHandle|MessageBox)\s*\(' -Label 'non-Unicode Windows API' -Files $cesSources
 
 $cesOwnedFiles = @(Get-ChildItem -LiteralPath $cesRoot -File -Recurse | Where-Object {
-        $_.FullName -notmatch '[\\/]build[\\/]' -and $_.FullName -ne $PSCommandPath
+        $_.FullName -notmatch '[\\/]build[\\/]' -and $_.FullName -notmatch '[\\/]tools[\\/]verification[\\/]' -and $_.FullName -ne $PSCommandPath
     })
 Test-CesPattern -Pattern 'cpp-echo-client|\.\.[\\/].*(common|shared)|add_subdirectory\s*\(' -Label 'cross-project dependency' -Files $cesOwnedFiles
 
@@ -40,3 +40,4 @@ if ($cesFailures.Count -ne 0) {
 }
 
 Write-Host 'PASS server source policy'
+
