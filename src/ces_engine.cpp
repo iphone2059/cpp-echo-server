@@ -163,6 +163,7 @@ static void ces_engine_arm(ces_engine_worker* worker) noexcept {
     if (!ces_notification_mark_rearmed(&worker->notification_armed)) {
         ces_engine_fail_fast(L"notification rearm transition", ERROR_INVALID_STATE);
     }
+    ++worker->notify_arms;
 }
 
 // Lazy arm: the completion queue is armed exactly while RIO work is outstanding and no notification
@@ -411,6 +412,7 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
             if (!ces_notification_mark_delivered(&worker->notification_armed)) {
                 ces_engine_fail_fast(L"notification delivery transition", ERROR_INVALID_STATE);
             }
+            ++worker->notify_deliveries;
             ces_engine_drain_worker(worker);
             // A bounded drain may leave results queued; arming an already nonempty CQ notifies
             // immediately, so the rearm only has to happen while work is still outstanding.
@@ -423,6 +425,10 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
             ces_engine_accept_operation* operation =
                 reinterpret_cast<ces_engine_accept_operation*>(static_cast<std::uintptr_t>(key));
             ces_engine_take_socket(worker, operation);
+        } else if (ok == FALSE && error == WAIT_TIMEOUT && overlapped == nullptr) {
+            if (!worker->stopping && worker->rio_outstanding != 0 && !worker->notification_armed) {
+                ++worker->notify_timeout_wakeups;
+            }
         } else if (ok == FALSE && error != WAIT_TIMEOUT) {
             ces_engine_report(L"GetQueuedCompletionStatus(worker)", static_cast<int>(error));
             ++worker->statistics.network_errors;
@@ -453,6 +459,14 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
     if (worker->rio_outstanding != 0) {
         ces_engine_fail_fast(L"worker RIO cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }
+#ifndef NDEBUG
+    if (worker->notify_timeout_wakeups != 0) {
+        ces_engine_fail_fast(L"worker notification starvation", ERROR_INVALID_STATE);
+    }
+    if (worker->notify_arms < worker->notify_deliveries || worker->notify_arms - worker->notify_deliveries > 1U) {
+        ces_engine_fail_fast(L"worker notification accounting", ERROR_INVALID_STATE);
+    }
+#endif
     return worker->failed->load(std::memory_order_acquire) ? 1U : 0U;
 }
 

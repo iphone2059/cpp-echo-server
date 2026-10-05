@@ -125,6 +125,12 @@ struct ces_engine_worker {
     // RIO posts that have not completed yet; the arm policy keys off this counter and the release
     // precondition requires it to be zero before the completion queue is closed.
     std::uint32_t                       rio_outstanding;
+    // Notification accounting. A bounded wait that expires while RIO work is outstanding and no
+    // notification is armed means the queue was never armed for that work, so debug builds treat a
+    // non-zero starvation count as a failure instead of silently degrading to timeout polling.
+    std::uint64_t                       notify_arms;
+    std::uint64_t                       notify_deliveries;
+    std::uint64_t                       notify_timeout_wakeups;
     // Cross-thread admission credit: the acceptor reserves one unit before publishing a handoff,
     // and the worker returns it when the connection ends or the handoff is rolled back.
     std::atomic<std::uint32_t>          admission_credit;
