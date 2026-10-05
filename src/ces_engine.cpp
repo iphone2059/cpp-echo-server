@@ -1213,34 +1213,13 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     if (failed && socket_value != INVALID_SOCKET) {
         ces_engine_owned_socket_close(&socket_owner, &socket_value);
     }
-    if (armed && completion_queue != RIO_INVALID_CQ) {
-        if (PostQueuedCompletionStatus(port, 0, 0, &notification_overlapped) == FALSE) {
-            ces_engine_fail_fast(L"PostQueuedCompletionStatus(UDP notification shutdown)",
-                                 static_cast<int>(GetLastError()));
-        }
-        // Drain FIFO leftovers (a real RIONotify delivery or a residual datagram result) until
-        // the notification OVERLAPPED itself comes back, instead of assuming it is first.
-        const ULONGLONG deadline = GetTickCount64() + ces_engine_notification_retire_timeout_ms;
-        bool            retired  = false;
-        while (!retired) {
-            const ULONGLONG now       = GetTickCount64();
-            const DWORD     remaining = now >= deadline ? 0U : static_cast<DWORD>(deadline - now);
-            if (remaining == 0U) {
-                ces_engine_fail_fast(L"UDP notification shutdown timeout", ERROR_TIMEOUT);
-            }
-            DWORD       transferred = 0;
-            ULONG_PTR   key         = 0;
-            OVERLAPPED* overlapped  = nullptr;
-            if (GetQueuedCompletionStatus(port, &transferred, &key, &overlapped, remaining) == FALSE) {
-                ces_engine_fail_fast(L"GetQueuedCompletionStatus(UDP notification shutdown)",
-                                     static_cast<int>(GetLastError()));
-            }
-            retired = overlapped == &notification_overlapped;
-        }
-        if (!ces_notification_mark_delivered(&armed)) {
-            ces_engine_fail_fast(L"UDP notification shutdown transition", ERROR_INVALID_STATE);
-        }
-    }
+    // Teardown contract: after this point no new RIO request is posted, every published operation
+    // has already retired, and only then is the completion queue closed. RIOCloseCompletionQueue
+    // invalidates the queue and silently drops completions that would have been added afterwards,
+    // so outstanding must be zero here and no accounting may depend on a later completion. A
+    // pending RIONotify delivery is deliberately not awaited: the notification OVERLAPPED stays
+    // valid until the IOCP handle is closed at the end of this function, which is the last object
+    // that can reference it.
     if (outstanding != 0) {
         ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }
