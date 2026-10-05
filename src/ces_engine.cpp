@@ -138,16 +138,11 @@ static bool ces_engine_configure_socket(SOCKET socket_value, const ces_options* 
 }
 
 static void ces_engine_arm(ces_engine_worker* worker) noexcept {
-    if (worker->notification_armed) {
-        ces_engine_fail_fast(L"duplicate worker RIONotify", ERROR_INVALID_STATE);
-    }
+    // The OVERLAPPED reset stays in the production wrapper: it is not part of the transaction a fake
+    // provider drives.
     std::memset(&worker->notification_overlapped, 0, sizeof(worker->notification_overlapped));
-    const int status = worker->rio->RIONotify(worker->completion_queue);
-    ces_require_rio_notify_success(status, L"RIONotify(worker)");
-    if (!ces_notification_mark_rearmed(&worker->notification_armed)) {
-        ces_engine_fail_fast(L"notification rearm transition", ERROR_INVALID_STATE);
-    }
-    ++worker->notify_arms;
+    ces_notification_arm(worker->rio, worker->completion_queue, &worker->notification_armed, &worker->notify_arms,
+                         L"RIONotify(worker)");
 }
 
 // Lazy arm: the completion queue is armed exactly while RIO work is outstanding and no notification
@@ -985,16 +980,10 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
 static void ces_engine_udp_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                RIO_CQ                              queue,
                                OVERLAPPED*                         overlapped,
-                               bool*                               armed) noexcept {
-    if (*armed) {
-        ces_engine_fail_fast(L"duplicate UDP RIONotify", ERROR_INVALID_STATE);
-    }
+                               bool*                               armed,
+                               std::uint64_t*                      arm_count) noexcept {
     std::memset(overlapped, 0, sizeof(*overlapped));
-    const int status = rio->RIONotify(queue);
-    ces_require_rio_notify_success(status, L"RIONotify(UDP)");
-    if (!ces_notification_mark_rearmed(armed)) {
-        ces_engine_fail_fast(L"UDP notification rearm transition", ERROR_INVALID_STATE);
-    }
+    ces_notification_arm(rio, queue, armed, arm_count, L"RIONotify(UDP)");
 }
 
 static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
@@ -1102,8 +1091,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             ++outstanding;
         }
         if (ces_notify_should_arm(armed, outstanding)) {
-            ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
-            ++notify_arms;
+            ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed, &notify_arms);
         }
     }
 
@@ -1197,8 +1185,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                 }
             }
             if (ces_notify_should_arm(armed, outstanding)) {
-                ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
-                ++notify_arms;
+                ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed, &notify_arms);
             }
         } else if (ok == FALSE && error == WAIT_TIMEOUT && overlapped == nullptr) {
             // A bounded wait that expires while RIO work is outstanding and no notification is armed

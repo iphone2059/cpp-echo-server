@@ -56,6 +56,25 @@ static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) no
     __assume(0);
 }
 
+void ces_notification_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
+                          RIO_CQ                              completion_queue,
+                          bool*                               armed,
+                          std::uint64_t*                      arm_count,
+                          const wchar_t*                      stage) noexcept {
+    if (rio == nullptr || rio->RIONotify == nullptr || armed == nullptr || arm_count == nullptr || stage == nullptr) {
+        ces_engine_fail_fast(L"notification arm arguments", ERROR_INVALID_PARAMETER);
+    }
+    if (*armed) {
+        ces_engine_fail_fast(L"duplicate notification arm", ERROR_INVALID_STATE);
+    }
+    const int status = rio->RIONotify(completion_queue);
+    ces_require_rio_notify_success(status, stage);
+    if (!ces_notification_mark_rearmed(armed)) {
+        ces_engine_fail_fast(L"notification rearm transition", ERROR_INVALID_STATE);
+    }
+    ++*arm_count;
+}
+
 void ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept {
     const ces_rio_notify_outcome outcome = ces_rio_notify_outcome_of(status);
     if (outcome == ces_rio_notify_outcome::armed) {
