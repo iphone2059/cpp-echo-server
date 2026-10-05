@@ -96,7 +96,7 @@ try {
     $tcp.WaitForExit(7000) | Out-Null
     if (-not $tcp.HasExited -or $tcp.ExitCode -ne 0) { throw 'TCP server did not stop cleanly' }
     $tcpText = Get-Content -LiteralPath $tcpOutputPath -Raw
-    if ($tcpText -notmatch 'final protocol=tcp .*accepted=[1-9][0-9]* .*bytes=[1-9][0-9]* .*active=0') {
+    if ($tcpText -notmatch 'final protocol=tcp .*accepted=[1-9][0-9]* active=0 outstanding=0 .*bytes=[1-9][0-9]*') {
         throw "TCP final statistics are missing or incomplete: $tcpText"
     }
     $tcpStats = Get-FinalStatistics -Text $tcpText -Protocol 'tcp'
@@ -274,7 +274,7 @@ try {
     $udp.WaitForExit(7000) | Out-Null
     if (-not $udp.HasExited -or $udp.ExitCode -ne 0) { throw 'UDP server did not stop cleanly' }
     $udpText = Get-Content -LiteralPath $udpOutputPath -Raw
-    if ($udpText -notmatch 'final protocol=udp .*completions=[1-9][0-9]* .*receives=[1-9][0-9]* .*sends=3 .*bytes=65508 .*outstanding=0') {
+    if ($udpText -notmatch 'final protocol=udp .*active=0 outstanding=0 completions=[1-9][0-9]* receives=[1-9][0-9]* sends=3 .*bytes=65508') {
         throw "UDP final statistics are missing or incomplete: $udpText"
     }
     $udpStats = Get-FinalStatistics -Text $udpText -Protocol 'udp'

@@ -42,14 +42,14 @@ static void ces_test_parser() noexcept {
     error.fill(L'\0');
     ces_test_expect(!ces_parse_options(static_cast<int>(invalid_args.size()), invalid_args.data(), &invalid,
                                        error.data(), error.size()) &&
-                        std::wcsstr(error.data(), L"UDP") != nullptr,
+                        std::wcsstr(error.data(), L"protocol-option") != nullptr,
                     "server rejects UDP depth for TCP");
 
     std::array<wchar_t*, 3> unknown_args{ ces_test_arg(L"server"), ces_test_arg(L"/foo"), ces_test_arg(L"bar") };
     error.fill(L'\0');
     ces_test_expect(!ces_parse_options(static_cast<int>(unknown_args.size()), unknown_args.data(), &invalid,
                                        error.data(), error.size()) &&
-                        std::wcsstr(error.data(), L"unknown switch") != nullptr,
+                        std::wcsstr(error.data(), L"unknown-switch") != nullptr,
                     "server identifies unknown switch before parsing its value");
 
     std::array<wchar_t*, 5> case_args{ ces_test_arg(L"server"), ces_test_arg(L"/P"), ces_test_arg(L"TcP"),
@@ -86,7 +86,7 @@ static void ces_test_udp_workers_and_capacity() noexcept {
     error.fill(L'\0');
     ces_test_expect(!ces_parse_options(static_cast<int>(worker_args.size()), worker_args.data(), &options, error.data(),
                                        error.size()) &&
-                        std::wcsstr(error.data(), L"0 or 1") != nullptr,
+                        std::wcsstr(error.data(), L"protocol-option") != nullptr,
                     "server UDP rejects multiple workers with a specific diagnostic");
 
     std::array<wchar_t*, 6> help_args{ ces_test_arg(L"server"), ces_test_arg(L"/h"),       ces_test_arg(L"/p"),
@@ -111,7 +111,7 @@ static void ces_test_udp_workers_and_capacity() noexcept {
     error.fill(L'\0');
     ces_test_expect(!ces_parse_options(static_cast<int>(depth_args.size()), depth_args.data(), &options, error.data(),
                                        error.size()) &&
-                        std::wcsstr(error.data(), L"twice /k") != nullptr,
+                        std::wcsstr(error.data(), L"cq-capacity") != nullptr,
                     "server UDP rejects a slot above CQ capacity");
 
     std::array<wchar_t*, 8> help_depth_args{ ces_test_arg(L"server"), ces_test_arg(L"/h"), ces_test_arg(L"/p"),

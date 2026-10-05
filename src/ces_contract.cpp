@@ -121,7 +121,7 @@ bool ces_parse_options(int             argc,
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view token{ argv[index] };
         if (!ces_contract_is_switch(token)) {
-            ces_contract_error(error, error_capacity, L"server does not accept positional arguments");
+            ces_contract_error(error, error_capacity, L"unexpected-target");
             return false;
         }
         std::size_t             offset    = token[0] == L'-' && token.size() > 1 && token[1] == L'-' ? 2U : 1U;
@@ -130,15 +130,10 @@ bool ces_parse_options(int             argc,
         const std::wstring_view name      = body.substr(0, separator);
         const std::wstring_view inline_value =
             separator == std::wstring_view::npos ? std::wstring_view{} : body.substr(separator + 1);
-        if (separator != std::wstring_view::npos && inline_value.empty()) {
-            ces_contract_error(error, error_capacity, L"switch requires a non-empty inline value");
-            return false;
-        }
-
         if (ces_contract_equal(name, L"q") || ces_contract_equal(name, L"quiet") ||
             ces_contract_equal(name, L"stats") || ces_contract_equal(name, L"h") || ces_contract_equal(name, L"help")) {
             if (separator != std::wstring_view::npos) {
-                ces_contract_error(error, error_capacity, L"flag switch does not accept a value");
+                ces_contract_error(error, error_capacity, L"unexpected-value");
                 return false;
             }
             options->quiet = options->quiet || ces_contract_equal(name, L"q") || ces_contract_equal(name, L"quiet");
@@ -148,13 +143,18 @@ bool ces_parse_options(int             argc,
         }
 
         if (!ces_contract_known_value_switch(name)) {
-            ces_contract_error(error, error_capacity, L"unknown switch");
+            ces_contract_error(error, error_capacity, L"unknown-switch");
+            return false;
+        }
+
+        if (separator != std::wstring_view::npos && inline_value.empty()) {
+            ces_contract_error(error, error_capacity, L"missing-value");
             return false;
         }
 
         std::wstring_view value{};
         if (!ces_contract_value(argc, argv, &index, inline_value, &value)) {
-            ces_contract_error(error, error_capacity, L"switch requires a non-empty value");
+            ces_contract_error(error, error_capacity, L"missing-value");
             return false;
         }
         std::uint64_t number = 0;
@@ -164,18 +164,18 @@ bool ces_parse_options(int             argc,
             } else if (ces_contract_equal(value, L"udp")) {
                 options->protocol = ces_protocol::udp;
             } else {
-                ces_contract_error(error, error_capacity, L"/p requires tcp or udp");
+                ces_contract_error(error, error_capacity, L"out-of-range");
                 return false;
             }
         } else if (!ces_contract_number(value, &number)) {
-            ces_contract_error(error, error_capacity, L"numeric switch has an invalid value");
+            ces_contract_error(error, error_capacity, L"invalid-number");
             return false;
         } else if (ces_contract_equal(name, L"s") && number >= 1 && number <= 65535) {
             options->port = static_cast<std::uint16_t>(number);
         } else if (ces_contract_equal(name, L"t") && number >= 1 && number <= UINT32_MAX) {
             options->timeout_seconds = static_cast<std::uint32_t>(number);
             saw_timeout              = true;
-        } else if (ces_contract_equal(name, L"w") && number >= 1 && number <= UINT32_MAX) {
+        } else if (ces_contract_equal(name, L"w") && number <= UINT32_MAX) {
             options->run_seconds = static_cast<std::uint32_t>(number);
         } else if (ces_contract_equal(name, L"b") && number <= INT32_MAX) {
             options->socket_buffer_bytes = static_cast<std::uint32_t>(number);
@@ -193,21 +193,21 @@ bool ces_parse_options(int             argc,
         } else if (ces_contract_equal(name, L"memory") && number >= 1048576) {
             options->memory_bytes = number;
         } else {
-            ces_contract_error(error, error_capacity, L"unknown switch or value outside its valid range");
+            ces_contract_error(error, error_capacity, L"out-of-range");
             return false;
         }
     }
 
     if (options->protocol == ces_protocol::tcp && saw_udp_depth) {
-        ces_contract_error(error, error_capacity, L"/k is available only for UDP");
+        ces_contract_error(error, error_capacity, L"protocol-option");
         return false;
     }
     if (options->protocol == ces_protocol::udp && saw_timeout) {
-        ces_contract_error(error, error_capacity, L"/t is available only for TCP");
+        ces_contract_error(error, error_capacity, L"protocol-option");
         return false;
     }
     if (options->protocol == ces_protocol::udp && saw_workers && options->worker_count > 1U) {
-        ces_contract_error(error, error_capacity, L"UDP /threads must be 0 or 1");
+        ces_contract_error(error, error_capacity, L"protocol-option");
         return false;
     }
     if (options->protocol == ces_protocol::udp) {
@@ -215,27 +215,48 @@ bool ces_parse_options(int             argc,
         if (!saw_rio_buffer) {
             options->rio_buffer_bytes = CES_MAXIMUM_UDP_PAYLOAD_BYTES;
         } else if (options->rio_buffer_bytes < CES_MAXIMUM_UDP_PAYLOAD_BYTES) {
-            ces_contract_error(error, error_capacity, L"UDP /rio-buffer must be at least 65507 bytes");
+            ces_contract_error(error, error_capacity, L"payload-size");
             return false;
         }
         if (options->udp_depth > options->cq_capacity / 2U) {
-            ces_contract_error(error, error_capacity, L"UDP /cq capacity must be at least twice /k");
+            ces_contract_error(error, error_capacity, L"cq-capacity");
             return false;
         }
         const std::size_t stride      = static_cast<std::size_t>(options->rio_buffer_bytes) + CES_UDP_ADDRESS_BYTES;
         std::size_t       arena_bytes = 0;
         if (!ces_checked_arena_bytes(options->udp_depth, stride, options->memory_bytes, &arena_bytes) ||
             arena_bytes > std::numeric_limits<std::uint32_t>::max()) {
-            ces_contract_error(error, error_capacity,
-                               L"UDP registered arena exceeds /memory or the 32-bit buffer limit");
+            ces_contract_error(error, error_capacity, L"memory-capacity");
             return false;
+        }
+    }
+    if (options->protocol == ces_protocol::tcp) {
+        // Every TCP worker needs a page-rounded share of /memory that can hold at least one
+        // connection slot; otherwise the worker cannot register its arena at all.
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        const std::uint64_t page    = system_info.dwPageSize == 0U ? 4096ULL : system_info.dwPageSize;
+        std::uint32_t       workers = options->worker_count;
+        if (workers == 0U) {
+            const DWORD processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+            workers = processors == 0U ? 1U : (processors < CES_MAX_WORKERS ? processors : CES_MAX_WORKERS);
+        }
+        const std::uint64_t pages = options->memory_bytes / page;
+        for (std::uint32_t index = 0; index < workers; ++index) {
+            const std::uint64_t budget = (pages / workers + (index < pages % workers ? 1ULL : 0ULL)) * page;
+            const std::uint64_t slots =
+                std::min<std::uint64_t>(options->cq_capacity / 2U, budget / options->rio_buffer_bytes);
+            if (slots == 0U) {
+                ces_contract_error(error, error_capacity, L"memory-capacity");
+                return false;
+            }
         }
     }
     if (options->help) {
         return true;
     }
     if (options->protocol == ces_protocol::none) {
-        ces_contract_error(error, error_capacity, L"missing /p tcp or /p udp");
+        ces_contract_error(error, error_capacity, L"missing-protocol");
         return false;
     }
     return true;

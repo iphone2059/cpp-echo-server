@@ -65,7 +65,9 @@ static void ces_engine_owned_socket_close(ces_socket_owner* owner, SOCKET* mirro
 }
 
 static void ces_engine_report(const wchar_t* stage, int error) noexcept {
-    std::fwprintf(stderr, L"%ls failed: native_error=%d\n", stage, error);
+    char text[160]{};
+    (void) WideCharToMultiByte(CP_UTF8, 0, stage, -1, text, sizeof(text), nullptr, nullptr);
+    std::fprintf(stderr, "%s failed: native_error=%d\n", text, error);
 }
 
 static void ces_engine_print_final_statistics(ces_protocol                 protocol,
@@ -76,35 +78,17 @@ static void ces_engine_print_final_statistics(ces_protocol                 proto
     const ULONGLONG guarded_elapsed      = std::max<ULONGLONG>(elapsed_milliseconds, 1U);
     const double    elapsed_seconds      = static_cast<double>(guarded_elapsed) / 1000.0;
     const double    mebibytes_per_second = static_cast<double>(statistics->bytes) / (1024.0 * 1024.0) / elapsed_seconds;
-    if (protocol == ces_protocol::tcp) {
-        std::fwprintf(stdout,
-                      L"final protocol=tcp elapsed_ms=%llu accepted=%llu completions=%llu receives=%llu sends=%llu "
-                      L"bytes=%llu MiB_per_sec=%.2f active=%u workers=%u received_bytes=%llu sent_bytes=%llu "
-                      L"network_errors=%llu rejected=%llu\n",
-                      static_cast<unsigned long long>(elapsed_milliseconds),
-                      static_cast<unsigned long long>(statistics->accepted),
-                      static_cast<unsigned long long>(statistics->completions),
-                      static_cast<unsigned long long>(statistics->receives),
-                      static_cast<unsigned long long>(statistics->sends),
-                      static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count,
-                      worker_count, static_cast<unsigned long long>(statistics->received_bytes),
-                      static_cast<unsigned long long>(statistics->sent_bytes),
-                      static_cast<unsigned long long>(statistics->network_errors),
-                      static_cast<unsigned long long>(statistics->rejected));
-        return;
-    }
-    std::fwprintf(
-        stdout,
-        L"final protocol=udp elapsed_ms=%llu completions=%llu receives=%llu sends=%llu bytes=%llu "
-        L"MiB_per_sec=%.2f outstanding=%u workers=%u received_bytes=%llu sent_bytes=%llu network_errors=%llu "
-        L"rejected=%llu\n",
-        static_cast<unsigned long long>(elapsed_milliseconds), static_cast<unsigned long long>(statistics->completions),
-        static_cast<unsigned long long>(statistics->receives), static_cast<unsigned long long>(statistics->sends),
-        static_cast<unsigned long long>(statistics->bytes), mebibytes_per_second, terminal_count, worker_count,
-        static_cast<unsigned long long>(statistics->received_bytes),
-        static_cast<unsigned long long>(statistics->sent_bytes),
+    std::printf(
+        "final protocol=%s elapsed_ms=%llu workers=%u accepted=%llu active=0 outstanding=%u completions=%llu "
+        "receives=%llu sends=%llu received_bytes=%llu sent_bytes=%llu bytes=%llu network_errors=%llu rejected=%llu "
+        "MiB_per_sec=%.2f\n",
+        protocol == ces_protocol::tcp ? "tcp" : "udp", static_cast<unsigned long long>(elapsed_milliseconds),
+        worker_count, static_cast<unsigned long long>(statistics->accepted), terminal_count,
+        static_cast<unsigned long long>(statistics->completions), static_cast<unsigned long long>(statistics->receives),
+        static_cast<unsigned long long>(statistics->sends), static_cast<unsigned long long>(statistics->received_bytes),
+        static_cast<unsigned long long>(statistics->sent_bytes), static_cast<unsigned long long>(statistics->bytes),
         static_cast<unsigned long long>(statistics->network_errors),
-        static_cast<unsigned long long>(statistics->rejected));
+        static_cast<unsigned long long>(statistics->rejected), mebibytes_per_second);
 }
 
 static bool ces_engine_load_rio(RIO_EXTENSION_FUNCTION_TABLE* table) noexcept {
@@ -586,15 +570,6 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
             worker->rio_outstanding != 0 || worker->timers.size != 0) {
             ces_engine_fail_fast(L"worker release precondition", ERROR_INVALID_STATE);
         }
-    }
-    if (worker->options != nullptr && worker->options->stats) {
-        std::fwprintf(stdout,
-                      L"[worker %u] accepted=%llu completions=%llu receives=%llu sends=%llu bytes=%llu active=%u\n",
-                      worker->worker_index, static_cast<unsigned long long>(worker->statistics.accepted),
-                      static_cast<unsigned long long>(worker->statistics.completions),
-                      static_cast<unsigned long long>(worker->statistics.receives),
-                      static_cast<unsigned long long>(worker->statistics.sends),
-                      static_cast<unsigned long long>(worker->statistics.bytes), worker->active_count);
     }
     worker->resources->completion_queue.reset();
     worker->completion_queue = RIO_INVALID_CQ;

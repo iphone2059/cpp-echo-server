@@ -49,7 +49,9 @@ static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) no
 }
 
 [[noreturn]] void ces_engine_fail_fast(const wchar_t* stage, int error) noexcept {
-    std::fwprintf(stderr, L"%ls failed: native_error=%d\n", stage, error);
+    char text[160]{};
+    (void) WideCharToMultiByte(CP_UTF8, 0, stage, -1, text, sizeof(text), nullptr, nullptr);
+    std::fprintf(stderr, "%s failed: native_error=%d\n", text, error);
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(ces_exit_code::internal));
     __assume(0);
 }
