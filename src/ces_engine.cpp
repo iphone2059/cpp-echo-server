@@ -38,12 +38,11 @@ class ces_engine_winsock {
     }
 };
 
-static constexpr ULONG_PTR     ces_engine_stop_key                       = 1U;
-static constexpr ULONG_PTR     ces_engine_admission_closed_key           = 2U;
-static constexpr ULONG         ces_engine_batch_size                     = 256U;
-static constexpr std::uint32_t ces_engine_max_drain_batches              = 64U;
-static constexpr std::uint32_t ces_engine_max_inline_accept_retries      = 4U;
-static constexpr ULONGLONG     ces_engine_notification_retire_timeout_ms = 5000ULL;
+static constexpr ULONG_PTR     ces_engine_stop_key                  = 1U;
+static constexpr ULONG_PTR     ces_engine_admission_closed_key      = 2U;
+static constexpr ULONG         ces_engine_batch_size                = 256U;
+static constexpr std::uint32_t ces_engine_max_drain_batches         = 64U;
+static constexpr std::uint32_t ces_engine_max_inline_accept_retries = 4U;
 
 static void ces_engine_acceptor_listener_close(ces_engine_acceptor* acceptor) noexcept {
     acceptor->resources->listener.reset();
@@ -166,6 +165,16 @@ static void ces_engine_arm(ces_engine_worker* worker) noexcept {
     }
 }
 
+// Lazy arm: the completion queue is armed exactly while RIO work is outstanding and no notification
+// is pending, and every RIO post and drain calls it, so a missed arm surfaces as blocked waits in
+// the notification counters rather than as a hang.
+static void ces_engine_maybe_arm(ces_engine_worker* worker) noexcept {
+    if (!ces_notify_should_arm(worker->notification_armed, worker->rio_outstanding)) {
+        return;
+    }
+    ces_engine_arm(worker);
+}
+
 static void ces_engine_release_connection(ces_engine_connection* connection) noexcept {
     ces_engine_worker* worker = connection->owner;
     ces_engine_connection_socket_close(connection);
@@ -203,6 +212,8 @@ static bool ces_engine_post_receive(ces_engine_connection* connection) noexcept 
         return false;
     }
     ++connection->outstanding;
+    ++connection->owner->rio_outstanding;
+    ces_engine_maybe_arm(connection->owner);
     connection->deadline =
         GetTickCount64() + static_cast<ULONGLONG>(connection->owner->options->timeout_seconds) * 1000ULL;
     if (!ces_timer_insert_or_update(&connection->owner->timers, connection->index, connection->deadline)) {
@@ -223,6 +234,8 @@ static bool ces_engine_post_send(ces_engine_connection* connection) noexcept {
         return false;
     }
     ++connection->outstanding;
+    ++connection->owner->rio_outstanding;
+    ces_engine_maybe_arm(connection->owner);
     connection->deadline =
         GetTickCount64() + static_cast<ULONGLONG>(connection->owner->options->timeout_seconds) * 1000ULL;
     if (!ces_timer_insert_or_update(&connection->owner->timers, connection->index, connection->deadline)) {
@@ -238,10 +251,11 @@ static void ces_engine_process_result(ces_engine_worker* worker, const RIORESULT
         ces_engine_fail_fast(L"worker RIO RequestContext", ERROR_INVALID_DATA);
     }
     ces_engine_connection* connection = request->connection;
-    if (connection->outstanding == 0) {
+    if (connection->outstanding == 0 || worker->rio_outstanding == 0) {
         ces_engine_fail_fast(L"worker RIO outstanding count", ERROR_INVALID_DATA);
     }
     --connection->outstanding;
+    --worker->rio_outstanding;
     ces_statistics_record_completion(&worker->statistics, request->operation, result.Status, result.BytesTransferred,
                                      connection->closing);
     if (connection->closing) {
@@ -373,7 +387,7 @@ static void ces_engine_stop_worker(ces_engine_worker* worker) noexcept {
 
 static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
     ces_engine_worker* worker = static_cast<ces_engine_worker*>(parameter);
-    ces_engine_arm(worker);
+    ces_engine_maybe_arm(worker);
     worker->ready = true;
     if (SetEvent(worker->ready_event) == FALSE) {
         ces_engine_fail_fast(L"SetEvent(worker ready)", static_cast<int>(GetLastError()));
@@ -398,7 +412,9 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
                 ces_engine_fail_fast(L"notification delivery transition", ERROR_INVALID_STATE);
             }
             ces_engine_drain_worker(worker);
-            ces_engine_arm(worker);
+            // A bounded drain may leave results queued; arming an already nonempty CQ notifies
+            // immediately, so the rearm only has to happen while work is still outstanding.
+            ces_engine_maybe_arm(worker);
         } else if (overlapped == nullptr && key == ces_engine_stop_key) {
             ces_engine_stop_worker(worker);
         } else if (overlapped == nullptr && key == ces_engine_admission_closed_key) {
@@ -429,34 +445,13 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
             break;
         }
     }
-    if (worker->notification_armed) {
-        if (PostQueuedCompletionStatus(worker->port, 0, 0, &worker->notification_overlapped) == FALSE) {
-            ces_engine_fail_fast(L"PostQueuedCompletionStatus(worker notification shutdown)",
-                                 static_cast<int>(GetLastError()));
-        }
-        // The port queue is FIFO, so a completion that raced the shutdown (a real RIONotify
-        // delivery, an admission-close or stop packet, or a residual accept result) can precede
-        // the packet just posted. Drain until the notification itself is retired.
-        const ULONGLONG deadline = GetTickCount64() + ces_engine_notification_retire_timeout_ms;
-        bool            retired  = false;
-        while (!retired) {
-            const ULONGLONG now       = GetTickCount64();
-            const DWORD     remaining = now >= deadline ? 0U : static_cast<DWORD>(deadline - now);
-            if (remaining == 0U) {
-                ces_engine_fail_fast(L"worker notification shutdown timeout", ERROR_TIMEOUT);
-            }
-            DWORD       transferred = 0;
-            ULONG_PTR   key         = 0;
-            OVERLAPPED* overlapped  = nullptr;
-            if (GetQueuedCompletionStatus(worker->port, &transferred, &key, &overlapped, remaining) == FALSE) {
-                ces_engine_fail_fast(L"GetQueuedCompletionStatus(worker notification shutdown)",
-                                     static_cast<int>(GetLastError()));
-            }
-            retired = overlapped == &worker->notification_overlapped;
-        }
-        if (!ces_notification_mark_delivered(&worker->notification_armed)) {
-            ces_engine_fail_fast(L"notification shutdown transition", ERROR_INVALID_STATE);
-        }
+    // Teardown contract: the loop only returns once every connection has retired all of its RIO
+    // work, so the completion queue can be closed without waiting for the last RIONotify delivery;
+    // the notification OVERLAPPED stays valid until the IOCP handle is closed in
+    // ces_engine_worker_destroy, which is the last object that can reference it. Forging an IOCP
+    // packet here would claim a notification that RIO never delivered.
+    if (worker->rio_outstanding != 0) {
+        ces_engine_fail_fast(L"worker RIO cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }
     return worker->failed->load(std::memory_order_acquire) ? 1U : 0U;
 }
@@ -574,7 +569,7 @@ static void ces_engine_worker_destroy(ces_engine_worker* worker) noexcept {
         if (!worker->stopping || !worker->admission_closed || worker->active_count != 0 ||
             worker->free_count != worker->slot_count ||
             worker->admission_credit.load(std::memory_order_relaxed) != worker->slot_count ||
-            worker->notification_armed || worker->timers.size != 0) {
+            worker->rio_outstanding != 0 || worker->timers.size != 0) {
             ces_engine_fail_fast(L"worker release precondition", ERROR_INVALID_STATE);
         }
     }

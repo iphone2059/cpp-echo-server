@@ -27,7 +27,7 @@ static void ces_engine_test_expect(bool condition, const char* name) noexcept {
 }
 
 static void ces_engine_test_lifecycle() noexcept {
-    ces_worker_lifecycle lifecycle{ ces_worker_phase::quiescing, 0, 0, true };
+    ces_worker_lifecycle lifecycle{ ces_worker_phase::quiescing, 0, 0, 0 };
     ces_engine_test_expect(!ces_worker_may_exit(&lifecycle), "worker requires admission barrier");
     lifecycle.phase = ces_worker_phase::admission_closed;
     ces_engine_test_expect(ces_worker_may_exit(&lifecycle), "worker exits after admission closes and work drains");
@@ -36,6 +36,11 @@ static void ces_engine_test_lifecycle() noexcept {
     lifecycle.pending_handoffs   = 0;
     lifecycle.active_connections = 1;
     ces_engine_test_expect(!ces_worker_may_exit(&lifecycle), "worker retains active connection");
+    lifecycle.active_connections = 0;
+    lifecycle.rio_outstanding    = 1;
+    ces_engine_test_expect(!ces_worker_may_exit(&lifecycle), "worker retains outstanding RIO work");
+    lifecycle.rio_outstanding = 0;
+    ces_engine_test_expect(ces_worker_may_exit(&lifecycle), "worker exits once RIO work has retired");
     ces_engine_test_expect(!ces_udp_may_release(ces_udp_phase::draining, 0), "UDP drain is not released early");
     ces_engine_test_expect(!ces_udp_may_release(ces_udp_phase::stopped, 1), "UDP outstanding retains storage");
     ces_engine_test_expect(ces_udp_may_release(ces_udp_phase::stopped, 0), "UDP stopped state releases storage");

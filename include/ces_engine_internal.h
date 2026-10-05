@@ -32,7 +32,10 @@ struct ces_worker_lifecycle {
     ces_worker_phase phase;
     std::uint32_t    active_connections;
     std::uint32_t    pending_handoffs;
-    bool             notification_armed;
+    // The teardown contract retires every RIO operation before closing the completion queue and
+    // never waits for the last RIONotify delivery, so the exit predicate checks outstanding RIO
+    // work rather than whether a notification happened to be observed.
+    std::uint32_t    rio_outstanding;
 };
 
 struct ces_engine_statistics {
@@ -119,6 +122,9 @@ struct ces_engine_worker {
     std::uint32_t                       slot_count;
     std::uint32_t                       free_count;
     std::uint32_t                       active_count;
+    // RIO posts that have not completed yet; the arm policy keys off this counter and the release
+    // precondition requires it to be zero before the completion queue is closed.
+    std::uint32_t                       rio_outstanding;
     // Cross-thread admission credit: the acceptor reserves one unit before publishing a handoff,
     // and the worker returns it when the connection ends or the handoff is rolled back.
     std::atomic<std::uint32_t>          admission_credit;

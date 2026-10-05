@@ -385,7 +385,7 @@ void ces_rio_cq_owner::reset(const RIO_EXTENSION_FUNCTION_TABLE* rio, RIO_CQ val
 
 bool ces_worker_may_exit(const ces_worker_lifecycle* lifecycle) noexcept {
     return lifecycle != nullptr && lifecycle->phase >= ces_worker_phase::admission_closed &&
-           lifecycle->active_connections == 0 && lifecycle->pending_handoffs == 0;
+           lifecycle->active_connections == 0 && lifecycle->pending_handoffs == 0 && lifecycle->rio_outstanding == 0;
 }
 
 bool ces_udp_may_release(ces_udp_phase phase, std::uint32_t outstanding) noexcept {
