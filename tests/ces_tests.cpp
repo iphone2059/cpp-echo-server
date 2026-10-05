@@ -138,6 +138,14 @@ static void ces_test_capacity() noexcept {
     ces_test_expect(!ces_checked_product(std::numeric_limits<std::size_t>::max(), 2, &value),
                     "server checked product rejects overflow");
     ces_test_expect(!ces_checked_arena_bytes(1024, 65536, 1024, &value), "server arena rejects memory limit excess");
+    ces_test_expect(ces_worker_memory_budget(1048576, 3, 0, 4096) == 352256 &&
+                        ces_worker_memory_budget(1048576, 3, 1, 4096) == 348160 &&
+                        ces_worker_memory_budget(1048576, 3, 2, 4096) == 348160,
+                    "server worker memory budget distributes whole pages");
+    ces_test_expect(ces_worker_memory_budget(1048576, 1, 0, 4096) == 1048576 &&
+                        ces_worker_memory_budget(1048576, 0, 0, 4096) == 0 &&
+                        ces_worker_memory_budget(1048576, 3, 0, 0) == 0,
+                    "server worker memory budget handles degenerate splits");
     ces_test_expect(ces_tcp_connection_capacity(1024, 800) == 512,
                     "server TCP capacity reserves two CQ entries per connection");
     ces_test_expect(ces_tcp_connection_capacity(1024, 300) == 300,
@@ -192,17 +200,31 @@ static void ces_test_notification_lifecycle() noexcept {
     ces_notify_model_deliver(&model, 3U);
     ces_test_expect(model.arms == 2U && model.outstanding == 0U && !model.armed,
                     "server notification model stays unarmed once no work is outstanding");
-
-    model.stopped = true;
-    ces_notify_model_deliver(&model, 0U);
-    ces_test_expect(model.arms == 2U && model.empty_deliveries == 1U,
-                    "server notification model never rearms after the stop transition");
+    ces_test_expect(ces_notify_model_may_close(&model),
+                    "server notification model closes the queue after a drained unarmed shutdown");
 
     ces_notify_model_timeout(&model);
     ces_test_expect(model.timeout_wakeups_while_outstanding == 0U,
                     "server notification model reports no starvation for a correct arming sequence");
     ces_test_expect(model.arms >= model.deliveries && model.arms - model.deliveries <= 1U,
                     "server notification model keeps at most one notification in flight");
+
+    // Teardown: work is outstanding and armed when the stop transition arrives, the RIO completions
+    // retire, and the notification itself is never consumed. Closing the queue is still legal.
+    ces_notify_model teardown{};
+    ces_notify_model_post(&teardown, 2U);
+    ces_test_expect(teardown.arms == 1U && teardown.armed && teardown.outstanding == 2U,
+                    "server notification model has one notification in flight during shutdown");
+    teardown.stopped = true;
+    ces_notify_model_retire(&teardown, 2U);
+    ces_test_expect(teardown.outstanding == 0U && teardown.armed && teardown.arms - teardown.deliveries == 1U &&
+                        ces_notify_model_may_close(&teardown),
+                    "server notification model closes the queue with one unconsumed notification");
+
+    ces_notify_model unarmed{};
+    ces_notify_model_deliver(&unarmed, 0U);
+    ces_test_expect(unarmed.violations == 1U && unarmed.deliveries == 0U && !ces_notify_model_may_close(&unarmed),
+                    "server notification model rejects a delivery that was never armed");
 
     ces_notify_model starved{};
     starved.outstanding = 4U;

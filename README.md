@@ -37,7 +37,7 @@ MSVC 使用 `/std:c++latest`，即已安装工具集所支持的最新 C++ 特�
 
 参数：`/p tcp|udp` 选择协议；`/s` 端口；`/t` TCP 空闲超时秒数；`/w` 总运行秒数；`/b` socket 缓冲区；`/k` UDP 并发深度；`/threads` TCP 工作线程；`/rio-buffer` 每槽字节数；`/cq` 每 CQ 容量；`/memory` 注册内存上限；`/q` 静默；`/stats` 输出统计。
 
-`/stats` 保留 TCP 的逐工作线程记录，并在所有工作线程加入、接入屏障关闭且 RIO 终态完成排空后输出 `final protocol=tcp ... active=0` 汇总。UDP 在通知状态解除且 `outstanding=0` 后输出 `final protocol=udp` 汇总。最终记录包含实际 `workers`、`received_bytes`、`sent_bytes`、`network_errors` 和 `rejected`。
+`/stats` 只输出一行最终记录（每次运行一行）：TCP 在所有工作线程加入、接入屏障关闭且 RIO 终态完成排空后输出 `final protocol=tcp ... active=0`，UDP 在 `outstanding=0` 后输出 `final protocol=udp`；两行都采用 v1 字段顺序，`workers` 是实际启动成功的工作线程数。UDP 的收尾**不再等待**最后一个 `RIONotify` 被观察到：通知 OVERLAPPED 只需活到 IOCP 句柄关闭，测试模型允许 `arms - deliveries == 1` 的未消费通知。最终记录包含 `workers`、`received_bytes`、`sent_bytes`、`network_errors` 和 `rejected`。
 
 `completions` 包含成功、错误与取消的 native RIO 完成；`receives` / `sends` 仅计成功的对应完成，包含 TCP EOF、零长度 UDP 和停止期间已成功完成的 I/O。`received_bytes` / `sent_bytes` 是成功完成返回的字节总和，含部分收发；兼容字段 `bytes` 始终等于 `sent_bytes`，`MiB_per_sec` 也按成功发送字节计算。`accepted` 是成功归属 worker 的 TCP 连接数，UDP 为 0；`rejected` 只计容量不足的 TCP 接入，主动停止丢弃的 handoff 不计拒绝。`network_errors` 记录失败的传输和接入事件，主动关闭后的失败完成不计网络错误，成功完成仍计入对应次数和字节数。完成次数随系统分段变化，不等于逻辑 echo 数。
 

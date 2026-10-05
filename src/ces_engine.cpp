@@ -317,13 +317,13 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
         return;
     }
     if (worker->free_count == 0) {
-        // Defensive: the acceptor reserves a slot before publishing a handoff, so this path only
-        // runs if the reservation and the worker pool ever disagree. Return the reservation rather
-        // than leaking it, and keep counting the rejection.
-        ++worker->statistics.rejected;
+        // The acceptor reserved a credit before publishing this handoff, so the worker must still hold
+        // a free slot: reaching here means the credit and the free pool have drifted apart. That is an
+        // invariant failure rather than capacity pressure, and reporting it as a rejection would both
+        // hide the drift and corrupt the rejected count.
         ces_worker_release_admission_credit(worker);
         ces_engine_ack_accept(operation);
-        return;
+        ces_engine_fail_fast(L"admission credit/free pool mismatch", ERROR_INVALID_STATE);
     }
     const std::uint32_t    index      = worker->free_indices[--worker->free_count];
     ces_engine_connection* connection = &worker->connections[index];
@@ -461,7 +461,6 @@ static bool ces_engine_worker_initialize(ces_engine_worker*                  wor
                                          std::uint32_t                       worker_index,
                                          std::uint32_t                       worker_count,
                                          ces_engine_worker_resources*        resources) noexcept {
-    std::memset(worker, 0, sizeof(*worker));
     worker->resources        = resources;
     worker->completion_queue = RIO_INVALID_CQ;
     worker->registration     = RIO_INVALID_BUFFERID;
@@ -479,7 +478,11 @@ static bool ces_engine_worker_initialize(ces_engine_worker*                  wor
         return false;
     }
 
-    const std::uint64_t memory_share   = options->memory_bytes / worker_count;
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    const std::uint64_t page = system_info.dwPageSize == 0U ? 4096ULL : system_info.dwPageSize;
+    const std::uint64_t memory_share =
+        ces_worker_memory_budget(options->memory_bytes, worker_count, worker_index, page);
     const std::uint64_t possible_slots = memory_share / worker->stride;
     if (possible_slots == 0) {
         ces_engine_report(L"worker registered arena capacity", ERROR_NOT_ENOUGH_MEMORY);
@@ -911,12 +914,12 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         worker_count =
             std::clamp(static_cast<std::uint32_t>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)), 1U, CES_MAX_WORKERS);
     }
-    ces_engine_worker* workers = static_cast<ces_engine_worker*>(
-        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ces_engine_worker) * worker_count));
-    ces_heap_owner                                 workers_owner{ workers };
+    // A real C++ allocation: the worker owns an atomic and must be constructed, not carved out of
+    // a heap block and memset.
+    std::unique_ptr<ces_engine_worker[]>           workers{ new (std::nothrow) ces_engine_worker[worker_count] };
     std::unique_ptr<ces_engine_worker_resources[]> worker_resources{ new (std::nothrow)
                                                                          ces_engine_worker_resources[worker_count] };
-    if (workers == nullptr || !worker_resources) {
+    if (!workers || !worker_resources) {
         ces_engine_report(L"worker array allocation", ERROR_NOT_ENOUGH_MEMORY);
         return ces_exit_code::network;
     }
@@ -937,7 +940,7 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     acceptor.listener     = INVALID_SOCKET;
     bool acceptor_started = false;
     if (!failed.load(std::memory_order_acquire)) {
-        acceptor_started = ces_engine_acceptor_initialize(&acceptor, rio, options, workers, worker_count, &failed,
+        acceptor_started = ces_engine_acceptor_initialize(&acceptor, rio, options, workers.get(), worker_count, &failed,
                                                           &acceptor_resources);
         if (!acceptor_started) {
             failed.store(true, std::memory_order_release);
@@ -972,7 +975,9 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         ces_statistics_add(&statistics, &workers[index].statistics);
     }
     if (options->stats) {
-        ces_engine_print_final_statistics(ces_protocol::tcp, &statistics, GetTickCount64() - start, worker_count, 0);
+        // Report the workers that actually started: a partial initialisation failure must not claim
+        // the requested worker count.
+        ces_engine_print_final_statistics(ces_protocol::tcp, &statistics, GetTickCount64() - start, initialized, 0);
     }
     return failed.load(std::memory_order_acquire) ? ces_exit_code::network : ces_exit_code::success;
 }
@@ -1022,9 +1027,14 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     RIO_CQ                     completion_queue = RIO_INVALID_CQ;
     RIO_RQ                     request_queue    = RIO_INVALID_RQ;
     OVERLAPPED                 notification_overlapped{};
-    bool                       armed       = false;
-    std::uint32_t              outstanding = 0;
-    bool                       failed      = false;
+    bool                       armed                  = false;
+    std::uint32_t              outstanding            = 0;
+    bool                       failed                 = false;
+    // Notification accounting for the UDP loop, mirroring the TCP worker: a bounded wait that
+    // expires with RIO work outstanding and no notification armed means the queue was never armed.
+    std::uint64_t              notify_arms            = 0;
+    std::uint64_t              notify_deliveries      = 0;
+    std::uint64_t              notify_timeout_wakeups = 0;
     ces_engine_statistics      statistics{};
 
     if (socket_value == INVALID_SOCKET || port == nullptr || memory == nullptr || slots == nullptr) {
@@ -1093,6 +1103,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         }
         if (ces_notify_should_arm(armed, outstanding)) {
             ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
+            ++notify_arms;
         }
     }
 
@@ -1125,6 +1136,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             if (!ces_notification_mark_delivered(&armed)) {
                 ces_engine_fail_fast(L"UDP notification delivery transition", ERROR_INVALID_STATE);
             }
+            ++notify_deliveries;
             for (std::uint32_t batch = 0; batch < ces_engine_max_drain_batches; ++batch) {
                 const ULONG count = ces_require_valid_dequeue_count(
                     rio->RIODequeueCompletion(completion_queue, results.data(), static_cast<ULONG>(results.size())),
@@ -1186,6 +1198,13 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             }
             if (ces_notify_should_arm(armed, outstanding)) {
                 ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
+                ++notify_arms;
+            }
+        } else if (ok == FALSE && error == WAIT_TIMEOUT && overlapped == nullptr) {
+            // A bounded wait that expires while RIO work is outstanding and no notification is armed
+            // means the queue was never armed for that work: debug builds treat it as starvation.
+            if (outstanding != 0 && !armed && !closing) {
+                ++notify_timeout_wakeups;
             }
         } else if (ok == FALSE && error != WAIT_TIMEOUT) {
             ces_engine_fail_fast(L"GetQueuedCompletionStatus(UDP)", static_cast<int>(error));
@@ -1204,6 +1223,14 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     // pending RIONotify delivery is deliberately not awaited: the notification OVERLAPPED stays
     // valid until the IOCP handle is closed at the end of this function, which is the last object
     // that can reference it.
+#ifndef NDEBUG
+    if (notify_timeout_wakeups != 0) {
+        ces_engine_fail_fast(L"UDP notification starvation", ERROR_INVALID_STATE);
+    }
+    if (notify_arms < notify_deliveries || notify_arms - notify_deliveries > 1U) {
+        ces_engine_fail_fast(L"UDP notification accounting", ERROR_INVALID_STATE);
+    }
+#endif
     if (outstanding != 0) {
         ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }

@@ -264,9 +264,8 @@ bool ces_parse_options(int             argc,
             const DWORD processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
             workers = processors == 0U ? 1U : (processors < CES_MAX_WORKERS ? processors : CES_MAX_WORKERS);
         }
-        const std::uint64_t pages = options->memory_bytes / page;
         for (std::uint32_t index = 0; index < workers; ++index) {
-            const std::uint64_t budget = (pages / workers + (index < pages % workers ? 1ULL : 0ULL)) * page;
+            const std::uint64_t budget = ces_worker_memory_budget(options->memory_bytes, workers, index, page);
             const std::uint64_t slots =
                 std::min<std::uint64_t>(options->cq_capacity / 2U, budget / options->rio_buffer_bytes);
             if (slots == 0U) {
@@ -303,6 +302,17 @@ bool ces_checked_arena_bytes(std::size_t   slots,
     }
     *bytes = result;
     return true;
+}
+
+std::uint64_t ces_worker_memory_budget(std::uint64_t memory_bytes,
+                                       std::uint32_t worker_count,
+                                       std::uint32_t worker_index,
+                                       std::uint64_t page_size) noexcept {
+    if (worker_count == 0U || page_size == 0U) {
+        return 0;
+    }
+    const std::uint64_t pages = memory_bytes / page_size;
+    return (pages / worker_count + (worker_index < pages % worker_count ? 1ULL : 0ULL)) * page_size;
 }
 
 std::uint32_t ces_tcp_connection_capacity(std::uint32_t cq_capacity, std::uint64_t memory_slots) noexcept {

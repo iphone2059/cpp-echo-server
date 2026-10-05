@@ -39,6 +39,14 @@ bool          ces_checked_arena_bytes(std::size_t   slots,
                                       std::uint64_t memory_limit,
                                       std::size_t*  bytes) noexcept;
 std::uint32_t ces_tcp_connection_capacity(std::uint32_t cq_capacity, std::uint64_t memory_slots) noexcept;
+
+// One budget for one TCP worker: /memory is split into whole pages, and the first "remainder" workers
+// receive one extra page. The parser validates against this and the runtime allocates with it, so a
+// configuration cannot pass validation and then fail to allocate (or the other way round).
+std::uint64_t ces_worker_memory_budget(std::uint64_t memory_bytes,
+                                       std::uint32_t worker_count,
+                                       std::uint32_t worker_index,
+                                       std::uint64_t page_size) noexcept;
 bool          ces_advance_offset(std::size_t total, std::size_t transferred, std::size_t* offset) noexcept;
 bool          ces_notification_mark_delivered(bool* armed) noexcept;
 bool          ces_notification_mark_rearmed(bool* armed) noexcept;

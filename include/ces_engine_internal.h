@@ -103,44 +103,47 @@ struct ces_engine_connection {
 };
 
 struct ces_engine_worker {
-    ces_engine_worker_resources*        resources;
-    const RIO_EXTENSION_FUNCTION_TABLE* rio;
-    const ces_options*                  options;
-    std::atomic<bool>*                  failed;
-    HANDLE                              port;
-    HANDLE                              thread;
-    HANDLE                              ready_event;
-    OVERLAPPED                          notification_overlapped;
-    RIO_CQ                              completion_queue;
-    RIO_BUFFERID                        registration;
-    char*                               memory;
-    ces_engine_connection*              connections;
-    std::uint32_t*                      free_indices;
-    ces_timer_node*                     timer_nodes;
-    std::uint32_t*                      timer_positions;
-    ces_timer_heap                      timers;
-    std::uint32_t                       slot_count;
-    std::uint32_t                       free_count;
-    std::uint32_t                       active_count;
+    // Every member is initialised here so the array can be created with a real C++ allocation and
+    // the worker never depends on a zero-filled heap block or a memset that cannot construct the
+    // admission-credit atomic.
+    ces_engine_worker_resources*        resources   = nullptr;
+    const RIO_EXTENSION_FUNCTION_TABLE* rio         = nullptr;
+    const ces_options*                  options     = nullptr;
+    std::atomic<bool>*                  failed      = nullptr;
+    HANDLE                              port        = nullptr;
+    HANDLE                              thread      = nullptr;
+    HANDLE                              ready_event = nullptr;
+    OVERLAPPED                          notification_overlapped{};
+    RIO_CQ                              completion_queue = RIO_INVALID_CQ;
+    RIO_BUFFERID                        registration     = RIO_INVALID_BUFFERID;
+    char*                               memory           = nullptr;
+    ces_engine_connection*              connections      = nullptr;
+    std::uint32_t*                      free_indices     = nullptr;
+    ces_timer_node*                     timer_nodes      = nullptr;
+    std::uint32_t*                      timer_positions  = nullptr;
+    ces_timer_heap                      timers{};
+    std::uint32_t                       slot_count             = 0;
+    std::uint32_t                       free_count             = 0;
+    std::uint32_t                       active_count           = 0;
     // RIO posts that have not completed yet; the arm policy keys off this counter and the release
     // precondition requires it to be zero before the completion queue is closed.
-    std::uint32_t                       rio_outstanding;
+    std::uint32_t                       rio_outstanding        = 0;
     // Notification accounting. A bounded wait that expires while RIO work is outstanding and no
     // notification is armed means the queue was never armed for that work, so debug builds treat a
     // non-zero starvation count as a failure instead of silently degrading to timeout polling.
-    std::uint64_t                       notify_arms;
-    std::uint64_t                       notify_deliveries;
-    std::uint64_t                       notify_timeout_wakeups;
+    std::uint64_t                       notify_arms            = 0;
+    std::uint64_t                       notify_deliveries      = 0;
+    std::uint64_t                       notify_timeout_wakeups = 0;
     // Cross-thread admission credit: the acceptor reserves one unit before publishing a handoff,
     // and the worker returns it when the connection ends or the handoff is rolled back.
-    std::atomic<std::uint32_t>          admission_credit;
-    std::uint32_t                       stride;
-    std::uint32_t                       worker_index;
-    ces_engine_statistics               statistics;
-    bool                                notification_armed;
-    bool                                stopping;
-    bool                                admission_closed;
-    bool                                ready;
+    std::atomic<std::uint32_t>          admission_credit{ 0 };
+    std::uint32_t                       stride       = 0;
+    std::uint32_t                       worker_index = 0;
+    ces_engine_statistics               statistics{};
+    bool                                notification_armed = false;
+    bool                                stopping           = false;
+    bool                                admission_closed   = false;
+    bool                                ready              = false;
 };
 
 struct ces_engine_acceptor {
