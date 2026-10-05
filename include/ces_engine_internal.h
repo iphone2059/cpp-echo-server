@@ -320,11 +320,25 @@ void              ces_require_rio_notify_success(int status, const wchar_t* stag
 // One RIONotify transaction: precondition, provider call, status classification, armed transition
 // and arm accounting. TCP workers and the UDP loop share it, and a fake provider can drive it through
 // RIO_EXTENSION_FUNCTION_TABLE::RIONotify without a socket, a port or a completion queue.
-void               ces_notification_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
-                                        RIO_CQ                              completion_queue,
-                                        bool*                               armed,
-                                        std::uint64_t*                      arm_count,
-                                        const wchar_t*                      stage) noexcept;
+void ces_notification_arm(const RIO_EXTENSION_FUNCTION_TABLE* rio,
+                          RIO_CQ                              completion_queue,
+                          bool*                               armed,
+                          std::uint64_t*                      arm_count,
+                          const wchar_t*                      stage) noexcept;
+
+// Opt-in diagnostics: notify counters are snapshotted after every worker thread has been joined and
+// written once to the file named by CES_DIAG_FILE, so the hot path never performs file I/O and the
+// frozen stdout/stderr streams stay untouched. A diagnostics failure never changes the run result.
+struct ces_notify_diagnostic_snapshot {
+    std::uint32_t worker;
+    std::uint64_t arms;
+    std::uint64_t deliveries;
+    std::uint64_t timeout_wakeups;
+};
+
+void               ces_write_diagnostics(const ces_notify_diagnostic_snapshot* values,
+                                         std::uint32_t                         count,
+                                         ces_protocol                          protocol) noexcept;
 ULONG              ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept;
 void               ces_statistics_add(ces_engine_statistics* total, const ces_engine_statistics* value) noexcept;
 void               ces_statistics_record_completion(ces_engine_statistics* statistics,
