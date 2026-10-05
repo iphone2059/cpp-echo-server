@@ -290,3 +290,17 @@ bool ces_notification_mark_rearmed(bool* armed) noexcept {
     *armed = true;
     return true;
 }
+
+ces_rio_notify_outcome ces_rio_notify_outcome_of(int status) noexcept {
+    if (status == ERROR_SUCCESS) {
+        return ces_rio_notify_outcome::armed;
+    }
+    if (status == static_cast<int>(WSAEALREADY)) {
+        return ces_rio_notify_outcome::duplicate_arm;
+    }
+    return ces_rio_notify_outcome::invalid;
+}
+
+bool ces_notify_should_arm(bool armed, std::uint32_t outstanding) noexcept {
+    return !armed && outstanding != 0U;
+}

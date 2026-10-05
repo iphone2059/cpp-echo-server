@@ -1107,7 +1107,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             }
             ++outstanding;
         }
-        if (outstanding != 0) {
+        if (ces_notify_should_arm(armed, outstanding)) {
             ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
         }
     }
@@ -1200,7 +1200,7 @@ static ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                     ++outstanding;
                 }
             }
-            if (outstanding != 0) {
+            if (ces_notify_should_arm(armed, outstanding)) {
                 ces_engine_udp_arm(rio, completion_queue, &notification_overlapped, &armed);
             }
         } else if (ok == FALSE && error != WAIT_TIMEOUT) {

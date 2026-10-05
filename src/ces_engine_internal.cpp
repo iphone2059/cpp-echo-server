@@ -55,9 +55,16 @@ static void ces_timer_sift_down(ces_timer_heap* heap, std::uint32_t position) no
 }
 
 void ces_require_rio_notify_success(int status, const wchar_t* stage) noexcept {
-    if (status != ERROR_SUCCESS) {
-        ces_engine_fail_fast(stage, status);
+    const ces_rio_notify_outcome outcome = ces_rio_notify_outcome_of(status);
+    if (outcome == ces_rio_notify_outcome::armed) {
+        return;
     }
+    if (outcome == ces_rio_notify_outcome::duplicate_arm) {
+        // A correct state machine never arms a queue whose previous notification is still pending,
+        // so report this distinctly instead of folding it into a generic RIONotify failure.
+        ces_engine_fail_fast(L"RIONotify duplicate arm", status);
+    }
+    ces_engine_fail_fast(stage, status);
 }
 
 ULONG ces_require_valid_dequeue_count(ULONG count, const wchar_t* stage) noexcept {

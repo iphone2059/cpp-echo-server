@@ -42,4 +42,15 @@ std::uint32_t ces_tcp_connection_capacity(std::uint32_t cq_capacity, std::uint64
 bool          ces_advance_offset(std::size_t total, std::size_t transferred, std::size_t* offset) noexcept;
 bool          ces_notification_mark_delivered(bool* armed) noexcept;
 bool          ces_notification_mark_rearmed(bool* armed) noexcept;
+
+// Documented RIONotify outcomes: ERROR_SUCCESS arms the queue, WSAEALREADY means a previous
+// RIONotify has not completed yet (a state-machine invariant failure, never a recovery branch),
+// and everything else is a hard error.
+enum class ces_rio_notify_outcome : std::uint8_t { armed = 0, duplicate_arm = 1, invalid = 2 };
+
+ces_rio_notify_outcome ces_rio_notify_outcome_of(int status) noexcept;
+
+// Lazy-arm policy: a worker arms the completion queue only when work is outstanding and no
+// notification is already pending, so "armed" always means exactly one RIONotify is in flight.
+bool          ces_notify_should_arm(bool armed, std::uint32_t outstanding) noexcept;
 ces_exit_code ces_run_server(const ces_options* options, std::atomic<bool>* stop_requested) noexcept;

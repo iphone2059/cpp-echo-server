@@ -1,3 +1,4 @@
+#include "ces_notify_model.h"
 #include "ces_types.h"
 
 #include <array>
@@ -148,6 +149,57 @@ static void ces_test_notification() noexcept {
     ces_test_expect(!ces_notification_mark_delivered(&armed), "server CQ delivery cannot consume notification twice");
     ces_test_expect(ces_notification_mark_rearmed(&armed) && armed, "server CQ drain rearms notification once");
     ces_test_expect(!ces_notification_mark_rearmed(&armed), "server CQ cannot be rearmed twice");
+
+    // Documented RIONotify return values: only ERROR_SUCCESS arms the queue, WSAEALREADY means a
+    // previous notification has not completed (an invariant failure, never a recovery branch).
+    const ces_notify_status_case status_cases[] = {
+        { ERROR_SUCCESS,           ces_rio_notify_outcome::armed,         "server RIONotify success is the only arm outcome" },
+        { WSAEALREADY,             ces_rio_notify_outcome::duplicate_arm,
+         "server RIONotify duplicate arm is an invariant failure"                                                            },
+        { WSAEINVAL,               ces_rio_notify_outcome::invalid,       "server RIONotify invalid queue is a hard error"   },
+        { ERROR_NOT_ENOUGH_MEMORY, ces_rio_notify_outcome::invalid,       "server RIONotify unknown status is a hard error"  },
+    };
+    for (const ces_notify_status_case& item : status_cases) {
+        ces_test_expect(ces_rio_notify_outcome_of(item.status) == item.expected, item.name);
+    }
+
+    ces_test_expect(!ces_notify_should_arm(false, 0U) && ces_notify_should_arm(false, 1U) &&
+                        !ces_notify_should_arm(true, 0U) && !ces_notify_should_arm(true, 1U),
+                    "server arms only while work is outstanding and no notification is pending");
+}
+
+static void ces_test_notification_lifecycle() noexcept {
+    ces_notify_model model{};
+    ces_notify_model_post(&model, 3U);
+    ces_test_expect(model.arms == 1U && model.armed, "server notification model arms once for a posted batch");
+
+    ces_notify_model_post(&model, 2U);
+    ces_test_expect(model.arms == 1U, "server notification model never arms twice while a notification is pending");
+
+    ces_notify_model_deliver(&model, 2U);
+    ces_test_expect(model.arms == 2U && model.deliveries == 1U && model.outstanding == 3U,
+                    "server notification model rearms when a delivery leaves work outstanding");
+
+    ces_notify_model_deliver(&model, 3U);
+    ces_test_expect(model.arms == 2U && model.outstanding == 0U && !model.armed,
+                    "server notification model stays unarmed once no work is outstanding");
+
+    model.stopped = true;
+    ces_notify_model_deliver(&model, 0U);
+    ces_test_expect(model.arms == 2U && model.empty_deliveries == 1U,
+                    "server notification model never rearms after the stop transition");
+
+    ces_notify_model_timeout(&model);
+    ces_test_expect(model.timeout_wakeups_while_outstanding == 0U,
+                    "server notification model reports no starvation for a correct arming sequence");
+    ces_test_expect(model.arms >= model.deliveries && model.arms - model.deliveries <= 1U,
+                    "server notification model keeps at most one notification in flight");
+
+    ces_notify_model starved{};
+    starved.outstanding = 4U;
+    ces_notify_model_timeout(&starved);
+    ces_test_expect(starved.timeout_wakeups_while_outstanding == 1U && !starved.armed,
+                    "server notification model exposes a missed arm as a timeout with work outstanding");
 }
 
 int main() {
@@ -156,6 +208,7 @@ int main() {
     ces_test_capacity();
     ces_test_progression();
     ces_test_notification();
+    ces_test_notification_lifecycle();
     std::printf("server_contract_failures=%d\n", ces_test_failures);
     return ces_test_failures == 0 ? 0 : 1;
 }
