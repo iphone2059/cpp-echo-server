@@ -1,0 +1,122 @@
+{
+  "contentRevision": "v1-cpp-2026-10-05-r2",
+  "frozenAt": "2026-10-05T20:55:02",
+  "project": "cpp-echo-server",
+  "frozenHead": "fd8e8e9440299f8a9f64a050cd4de49efda566f5",
+  "pairedFrozenHead": "6500e34a31660db03aeec3e90ef6eca8c618d154",
+  "fileCount": 28,
+  "files": [
+    {
+      "path": ".clang-format",
+      "sha256": "50b2dae004145b8e773d2b6d728e205eacdd9fbfab1791b024d5762b43e3ce21"
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "5172bdad64a8861829dabf5de12291d56b6fcddab9fdef427f84f01ccd1a7eea"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "d4c352b0e0c3198e125dfcb938871295bd673d99276e5150fbcf61f988742daf"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "cc52fca37d00ccbe88a5c004d5d990add4acedc00268c346565fa2982b56e313"
+    },
+    {
+      "path": "Package.swift",
+      "sha256": "9d32c952b16aab58c529ec764df46b5e1807bb9c9a3dc7b1685b747b07300c9b"
+    },
+    {
+      "path": "README.md",
+      "sha256": "61e93db2e03feee3f0c851cb8b5e5d78cba7674b56eb02a619afdbf814fef4a9"
+    },
+    {
+      "path": "build.ps1",
+      "sha256": "d29aadeb4e02f77dd3e16ddf8d257486ebb80285de8e17cd2a00f067b011b8f3"
+    },
+    {
+      "path": "build_debug.ps1",
+      "sha256": "11954105cd40d6ea25fcd2fe626b6b3ada151fd60b26b7e6d5d01b42f485285e"
+    },
+    {
+      "path": "build_release.ps1",
+      "sha256": "bdab087897393ab3da963e58ea807abed46403c4ac7df7426f85fa06ba352f46"
+    },
+    {
+      "path": "cmake/ces_constraints.cmake",
+      "sha256": "0520e4238e4bcf01bbd0fe0533e61bd8dbcaf3c4f19c4475449673cb8f166b2c"
+    },
+    {
+      "path": "format.ps1",
+      "sha256": "78590813e83b620b8edc5a02e51db95757284d2b25ab1be44e43db6ffbbdd3f6"
+    },
+    {
+      "path": "include/ces_compiler_contract.h",
+      "sha256": "cc37d5035fff9f08f130cc3fc352262793e48625ae61e05a2e4ba618ccde14dd"
+    },
+    {
+      "path": "include/ces_engine_internal.h",
+      "sha256": "10958195be828ec35c03861d0411482ce77525dd8b8e2ffd6f96b692bcd24843"
+    },
+    {
+      "path": "include/ces_rio_layout.h",
+      "sha256": "8e39244e0c8364607bad9d55a7495455e08c3dafea67dd6d91f3f542e27a51e2"
+    },
+    {
+      "path": "include/ces_types.h",
+      "sha256": "d80580bf9483d8e423c12964ccb9431a838544908e660572b5c2b8be59dd764b"
+    },
+    {
+      "path": "src/ces_contract.cpp",
+      "sha256": "1a22751f1d7aa66827ed5ddef10ad697d504bbb51ac2890e9e470fbf2ea4566a"
+    },
+    {
+      "path": "src/ces_engine.cpp",
+      "sha256": "16c39bf750be65bcfb502d9f2b36494d3a0368f471c9131ef6c8c8001734ee58"
+    },
+    {
+      "path": "src/ces_engine_internal.cpp",
+      "sha256": "89e46a4f929176440af0e8d07c2f8846bcba7821ecf896ba891b223da6df5dac"
+    },
+    {
+      "path": "src/main.cpp",
+      "sha256": "9231d47468b248b236bebd68012b44d9769de7561bed6f8c4dd3a1996395de1f"
+    },
+    {
+      "path": "tests/ces_engine_tests.cpp",
+      "sha256": "f6cf343c8f7179f22942e3687f6999ca942cf3240822d68041c5c3c0de67ec61"
+    },
+    {
+      "path": "tests/ces_fault_driver.cpp",
+      "sha256": "1c00fd5f3d41f88e1d57dc16b49d36be2407380d311a83de02663c82f5727be4"
+    },
+    {
+      "path": "tests/ces_fault_process_tests.ps1",
+      "sha256": "060d4977f7aa7e8dc4905d2a40e6ffac199fd1e8751f6fd3a52af48729b603fd"
+    },
+    {
+      "path": "tests/ces_notify_model.h",
+      "sha256": "cb8c7d0dd28b69c84bcfe1590cd582318ea1ec8c447bf4794d08396ba2e26bce"
+    },
+    {
+      "path": "tests/ces_process_tests.ps1",
+      "sha256": "987de7e29fb6a8e7058c9f74fec1ab9ae6a0cde94def1352df4d3917f672e955"
+    },
+    {
+      "path": "tests/ces_reset_storm_tests.ps1",
+      "sha256": "59b7b52d31120733c202935655fb4b3e5a045b2bebd320dcf882eabe82e2e5e1"
+    },
+    {
+      "path": "tests/ces_source_policy.ps1",
+      "sha256": "8f3b04cac3378b9a74d90bb5a06b22e6d289da19aa0d10847cbbf6ccd355ef79"
+    },
+    {
+      "path": "tests/ces_tests.cpp",
+      "sha256": "f39cad6a5aab32d86002135727b439760be657e01154f380208639485e7a2738"
+    },
+    {
+      "path": "tools/notify-diagnostics.ps1",
+      "sha256": "06efb8c9ece7cf0988609eb5b4e5bc8cdec50b7054bca249d8764ce6aea43e02"
+    }
+  ]
+}
