@@ -969,18 +969,18 @@ static ces_exit_code ces_engine_run_tcp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     ces_engine_statistics statistics{};
     statistics.network_errors = acceptor.network_errors;
     statistics.rejected       = acceptor.rejected;
-    // Snapshot the notification counters while the worker threads are joined and their storage is
-    // still alive; the file itself is written once, after every teardown step has completed.
+    for (std::uint32_t index = 0; index < initialized; ++index) {
+        ces_engine_worker_destroy(&workers[index]);
+        ces_statistics_add(&statistics, &workers[index].statistics);
+    }
+    // Every worker thread has joined; its counters remain alive in the worker array after resource
+    // teardown. Snapshot only now, when no worker can still update them.
     std::array<ces_notify_diagnostic_snapshot, CES_MAX_WORKERS> snapshots{};
     for (std::uint32_t index = 0; index < initialized; ++index) {
         snapshots[index].worker          = index;
         snapshots[index].arms            = workers[index].notify_arms;
         snapshots[index].deliveries      = workers[index].notify_deliveries;
         snapshots[index].timeout_wakeups = workers[index].notify_timeout_wakeups;
-    }
-    for (std::uint32_t index = 0; index < initialized; ++index) {
-        ces_engine_worker_destroy(&workers[index]);
-        ces_statistics_add(&statistics, &workers[index].statistics);
     }
     (void) ces_write_diagnostics(snapshots.data(), initialized, ces_protocol::tcp);
     if (options->stats) {

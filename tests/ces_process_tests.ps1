@@ -175,8 +175,10 @@ try {
 }
 
 $timeoutPort = Get-FreeTcpPort
+$timeoutOutputPath = [System.IO.Path]::GetTempFileName()
 $timeoutServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $timeoutPort, '/t', '1',
-    '/w', '3', '/q', '/threads', '1', '/cq', '128', '/memory', '16777216') -PassThru -WindowStyle Hidden
+    '/w', '3', '/q', '/threads', '1', '/cq', '128', '/memory', '16777216') `
+    -RedirectStandardOutput $timeoutOutputPath -PassThru -WindowStyle Hidden
 try {
     Wait-TcpReady -Port $timeoutPort -Process $timeoutServer
     $socket = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::InterNetwork,
@@ -204,11 +206,14 @@ try {
 } finally {
     if (-not $timeoutServer.HasExited) { $timeoutServer.Kill($true) }
     $timeoutServer.Dispose()
+    Remove-Item -LiteralPath $timeoutOutputPath -Force -ErrorAction SilentlyContinue
 }
 
 $stormPort = Get-FreeTcpPort
+$stormOutputPath = [System.IO.Path]::GetTempFileName()
 $stormServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $stormPort, '/w', '2', '/q',
-    '/threads', '4', '/cq', '2048', '/memory', '134217728') -PassThru -WindowStyle Hidden
+    '/threads', '4', '/cq', '2048', '/memory', '134217728') `
+    -RedirectStandardOutput $stormOutputPath -PassThru -WindowStyle Hidden
 $stormJobs = @()
 try {
     Wait-TcpReady -Port $stormPort -Process $stormServer
@@ -242,6 +247,7 @@ try {
     }
     if (-not $stormServer.HasExited) { $stormServer.Kill($true) }
     $stormServer.Dispose()
+    Remove-Item -LiteralPath $stormOutputPath -Force -ErrorAction SilentlyContinue
 }
 
 $udpPort = Get-FreeUdpPort
@@ -291,8 +297,10 @@ try {
 }
 
 $udpTrafficPort = Get-FreeUdpPort
+$udpTrafficOutputPath = [System.IO.Path]::GetTempFileName()
 $udpTraffic = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'udp', '/s', $udpTrafficPort, '/w', '2',
-    '/q', '/k', '64', '/cq', '1024', '/memory', '67108864') -PassThru -WindowStyle Hidden
+    '/q', '/k', '64', '/cq', '1024', '/memory', '67108864') `
+    -RedirectStandardOutput $udpTrafficOutputPath -PassThru -WindowStyle Hidden
 $udpTrafficJob = $null
 try {
     Start-Sleep -Milliseconds 250
@@ -330,6 +338,7 @@ try {
     }
     if (-not $udpTraffic.HasExited) { $udpTraffic.Kill($true) }
     $udpTraffic.Dispose()
+    Remove-Item -LiteralPath $udpTrafficOutputPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host 'PASS server TCP/UDP loopback and stop-under-load scenarios'
