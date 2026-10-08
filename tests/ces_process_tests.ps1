@@ -68,7 +68,7 @@ $tcpPort = Get-FreeTcpPort
 $tcpOutputPath = [System.IO.Path]::GetTempFileName()
 $tcp = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $tcpPort, '/w', '2', '/q',
     '/threads', '2', '/cq', '1024', '/memory', '67108864', '/stats') -RedirectStandardOutput $tcpOutputPath `
-    -PassThru -WindowStyle Hidden
+    -PassThru -NoNewWindow
 try {
     Wait-TcpReady -Port $tcpPort -Process $tcp
     $client = [System.Net.Sockets.TcpClient]::new()
@@ -116,7 +116,7 @@ $capacityPort = Get-FreeTcpPort
 $capacityOutputPath = [System.IO.Path]::GetTempFileName()
 $capacityServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $capacityPort, '/w', '3',
     '/q', '/threads', '1', '/cq', '64', '/memory', '16777216', '/stats') `
-    -RedirectStandardOutput $capacityOutputPath -PassThru -WindowStyle Hidden
+    -RedirectStandardOutput $capacityOutputPath -PassThru -NoNewWindow
 $capacityClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
 $capacityRejectedClient = $null
 try {
@@ -178,7 +178,7 @@ $timeoutPort = Get-FreeTcpPort
 $timeoutOutputPath = [System.IO.Path]::GetTempFileName()
 $timeoutServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $timeoutPort, '/t', '1',
     '/w', '3', '/q', '/threads', '1', '/cq', '128', '/memory', '16777216') `
-    -RedirectStandardOutput $timeoutOutputPath -PassThru -WindowStyle Hidden
+    -RedirectStandardOutput $timeoutOutputPath -PassThru -NoNewWindow
 try {
     Wait-TcpReady -Port $timeoutPort -Process $timeoutServer
     $socket = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::InterNetwork,
@@ -213,7 +213,7 @@ $stormPort = Get-FreeTcpPort
 $stormOutputPath = [System.IO.Path]::GetTempFileName()
 $stormServer = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'tcp', '/s', $stormPort, '/w', '2', '/q',
     '/threads', '4', '/cq', '2048', '/memory', '134217728') `
-    -RedirectStandardOutput $stormOutputPath -PassThru -WindowStyle Hidden
+    -RedirectStandardOutput $stormOutputPath -PassThru -NoNewWindow
 $stormJobs = @()
 try {
     Wait-TcpReady -Port $stormPort -Process $stormServer
@@ -254,7 +254,7 @@ $udpPort = Get-FreeUdpPort
 $udpOutputPath = [System.IO.Path]::GetTempFileName()
 $udp = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'udp', '/s', $udpPort, '/w', '2', '/q',
     '/k', '64', '/cq', '1024', '/memory', '67108864', '/stats') -RedirectStandardOutput $udpOutputPath `
-    -PassThru -WindowStyle Hidden
+    -PassThru -NoNewWindow
 try {
     Start-Sleep -Milliseconds 250
     if ($udp.HasExited) { throw "UDP server exited early with code $($udp.ExitCode)" }
@@ -300,7 +300,7 @@ $udpTrafficPort = Get-FreeUdpPort
 $udpTrafficOutputPath = [System.IO.Path]::GetTempFileName()
 $udpTraffic = Start-Process -FilePath $ServerPath -ArgumentList @('/p', 'udp', '/s', $udpTrafficPort, '/w', '2',
     '/q', '/k', '64', '/cq', '1024', '/memory', '67108864') `
-    -RedirectStandardOutput $udpTrafficOutputPath -PassThru -WindowStyle Hidden
+    -RedirectStandardOutput $udpTrafficOutputPath -PassThru -NoNewWindow
 $udpTrafficJob = $null
 try {
     Start-Sleep -Milliseconds 250
