@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $platform = 'x64'
-$slnx = Join-Path $projectRoot 'cpp-echo-server.slnx'
+$project = Join-Path $projectRoot 'cpp-echo-server.vcxproj'
 $outputDirectory = Join-Path $projectRoot (Join-Path $platform $Configuration)
 $logDirectory = Join-Path $projectRoot 'logs'
 
@@ -102,25 +102,28 @@ try {
 
     $msbuild = Get-MSBuildPath
     $buildLog = Join-Path $logDirectory ("$($Configuration.ToLowerInvariant())-msbuild.log")
-    & $msbuild $slnx /p:Configuration=$Configuration /p:Platform=$platform /m /nologo /v:minimal "/flp:LogFile=$buildLog;Verbosity=normal" /clp:Summary
-    if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $Configuration/$platform; full log: $buildLog" }
+    $buildConfigurations = @($Configuration, ($Configuration + 'Tests'), ($Configuration + 'Pure'))
+    foreach ($buildConfiguration in $buildConfigurations) {
+        & $msbuild $project /p:Configuration=$buildConfiguration /p:Platform=$platform /m /nologo /v:minimal "/flp:LogFile=$buildLog;Verbosity=normal" /clp:Summary
+        if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $buildConfiguration/$platform; full log: $buildLog" }
+    }
     $warnings = @(Select-String -LiteralPath $buildLog -Pattern ': warning|warning MSB|warning LNK|warning C' -ErrorAction SilentlyContinue)
     if ($warnings.Count -ne 0) {
         $warnings | Select-Object -First 10 | ForEach-Object { Write-Host $_.Line }
         throw "MSBuild reported $($warnings.Count) warning(s); /WX builds must stay at zero warnings. Log: $buildLog"
     }
 
-    $testsExe = Join-Path $outputDirectory 'cpp-echo-server-tests.exe'
-    $engineTestsExe = Join-Path $outputDirectory 'cpp-echo-server-engine-tests.exe'
-    $pureEngineTestsExe = Join-Path $outputDirectory 'cpp-echo-server-pure-engine-tests.exe'
-    $faultDriverExe = Join-Path $outputDirectory 'cpp-echo-server-fault-driver.exe'
+    $testOutput = Join-Path $projectRoot (Join-Path $platform ($Configuration + 'Tests'))
+    $pureOutput = Join-Path $projectRoot (Join-Path $platform ($Configuration + 'Pure'))
+    $testsExe = Join-Path $testOutput 'cpp-echo-server-tests.exe'
+    $pureEngineTestsExe = Join-Path $pureOutput 'cpp-echo-server-pure-tests.exe'
     $serverExe = Join-Path $outputDirectory 'cpp-echo-server.exe'
 
-    Invoke-CesGate -Name 'unit-contract' -Command { & $testsExe }
-    Invoke-CesGate -Name 'engine' -Command { & $engineTestsExe }
-    Invoke-CesGate -Name 'pure-engine' -Command { & $pureEngineTestsExe }
+    Invoke-CesGate -Name 'unit-contract' -Command { & $testsExe unit }
+    Invoke-CesGate -Name 'engine' -Command { & $testsExe engine }
+    Invoke-CesGate -Name 'pure-engine' -Command { & $pureEngineTestsExe pure }
     Invoke-CesGate -Name 'fault-boundaries' -Command {
-        & pwsh -NoProfile -File (Join-Path $projectRoot 'tests\ces_fault_process_tests.ps1') -DriverPath $faultDriverExe
+        & pwsh -NoProfile -File (Join-Path $projectRoot 'tests\ces_fault_process_tests.ps1') -DriverPath $testsExe
     }
     Invoke-CesGate -Name 'source-policy' -Command {
         & pwsh -NoProfile -File (Join-Path $projectRoot 'tests\ces_source_policy.ps1') -ProjectRoot $projectRoot

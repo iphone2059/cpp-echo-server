@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path -LiteralPath $DriverPath -PathType Leaf)) {
-    throw "server fault driver not found: $DriverPath"
+    throw "server test executable not found: $DriverPath"
 }
 
 function Invoke-FaultCase {
@@ -20,7 +20,7 @@ function Invoke-FaultCase {
     )
 
     $errorPath = Join-Path $env:TEMP ("ces_fault_" + [Guid]::NewGuid().ToString('N') + '.err')
-    $process = Start-Process -FilePath $DriverPath -ArgumentList @($Mode) -PassThru -WindowStyle Hidden -RedirectStandardError $errorPath
+    $process = Start-Process -FilePath $DriverPath -ArgumentList @('fault', $Mode) -PassThru -WindowStyle Hidden -RedirectStandardError $errorPath
     try {
         if (-not $process.WaitForExit(10000)) {
             $process.Kill($true)

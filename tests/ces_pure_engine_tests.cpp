@@ -8,7 +8,7 @@
 
 import ces.test.support;
 
-int main() {
+int ces_pure_engine_tests_main() {
     ces_engine_test_tcp_event_contract();
     ces_engine_test_udp_event_contract();
     ces_engine_test_acceptor_state_contract();

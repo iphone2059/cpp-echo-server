@@ -323,7 +323,7 @@ static int ces_fault_acceptor_implicit_release(bool invalid, bool control) noexc
                1;
 }
 
-int wmain(int argc, wchar_t** argv) {
+int ces_fault_driver_main(int argc, wchar_t** argv) {
     if (argc != 2) {
         return 1;
     }

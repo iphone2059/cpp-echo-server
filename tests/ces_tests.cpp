@@ -254,7 +254,7 @@ static void ces_test_notification_lifecycle() noexcept {
                     "server notification model exposes a missed arm as a timeout with work outstanding");
 }
 
-int main() {
+int ces_tests_main() {
     ces_test_parser();
     ces_test_udp_workers_and_capacity();
     ces_test_capacity();

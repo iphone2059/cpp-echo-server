@@ -19,7 +19,7 @@ $script:CesSourceModules = [ordered]@{
     'server.cpp'   = 'ces.server'
 }
 $script:CesPlainUnits = @('main.cpp')
-$script:CesTestFiles = @('ces_test_support.cpp', 'ces_tests.cpp', 'ces_engine_tests.cpp', 'ces_pure_engine_tests.cpp', 'ces_fault_driver.cpp')
+$script:CesTestFiles = @('ces_test_support.cpp', 'ces_test_entry.cpp', 'ces_tests.cpp', 'ces_engine_tests.cpp', 'ces_pure_engine_tests.cpp', 'ces_fault_driver.cpp')
 # Allowed import direction. ces.types is the pure vocabulary; the runtime imports the pure engine; the
 # coordinator imports the runtime. The graph below is acyclic by construction and is asserted per file.
 $script:CesModuleLayers = [ordered]@{
@@ -141,7 +141,10 @@ function Get-CesPolicyFailures {
     }
 
     # 5. Plain translation units import modules instead of headers.
-    foreach ($relative in @('src\main.cpp', 'tests\ces_tests.cpp', 'tests\ces_engine_tests.cpp', 'tests\ces_pure_engine_tests.cpp', 'tests\ces_fault_driver.cpp')) {
+    foreach ($relative in @('src\main.cpp', 'tests\ces_test_entry.cpp', 'tests\ces_tests.cpp', 'tests\ces_engine_tests.cpp', 'tests\ces_pure_engine_tests.cpp', 'tests\ces_fault_driver.cpp')) {
+        # The dispatcher only declares the suite entry points; it consumes no module and therefore
+        # needs no import of its own.
+        if ($relative -eq 'tests\ces_test_entry.cpp') { continue }
         $file = Join-Path $Root $relative
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
         $lines = @(Get-Content -LiteralPath $file)
@@ -221,6 +224,80 @@ function Get-CesPolicyFailures {
         }
     }
     Find-CesPattern -Pattern '\.\.[\\/]|add_subdirectory\s*\(|cmake\s+-S|cmake_minimum_required' -Label 'cross-project dependency' -Files $dependencyFiles -Failures $failures
+
+    # 9. One project builds the implementation: product, test and pure-engine configurations of
+    #    a single .vcxproj. The pure configuration must stay native free and every source must be
+    #    listed by the project.
+    $projects = @(Get-ChildItem -LiteralPath $Root -File -Filter *.vcxproj)
+    if ($projects.Count -ne 1) {
+        $failures.Add('expected exactly one Visual Studio project, found ' + $projects.Count)
+    }
+    $projectText = ($projects | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join [Environment]::NewLine
+    $quote = [char]39
+    function Get-CesConfigurationMarker {
+        param([string] $Configuration, [string] $Kind)
+        if ($Kind -eq 'group') {
+            return '<ItemGroup Condition="' + $quote + '$(Configuration)|$(Platform)' + $quote + '==' + $quote + $Configuration + '|x64' + $quote + '">'
+        }
+        return '<ProjectConfiguration Include="' + $Configuration + '|x64">'
+    }
+    $configurations = @('Debug', 'Release', 'DebugTests', 'ReleaseTests', 'DebugPure', 'ReleasePure')
+    foreach ($configuration in $configurations) {
+        foreach ($kind in @('project', 'group')) {
+            $marker = Get-CesConfigurationMarker -Configuration $configuration -Kind $kind
+            if ($projectText.IndexOf($marker) -lt 0) {
+                $failures.Add('project does not declare the ' + $kind + ' entry for ' + $configuration + '|x64')
+            }
+        }
+    }
+    function Get-CesGroupSources {
+        param([string] $Text, [string] $Configuration)
+        $marker = Get-CesConfigurationMarker -Configuration $Configuration -Kind 'group'
+        $start = $Text.IndexOf($marker)
+        if ($start -lt 0) { return @() }
+        $end = $Text.IndexOf('</ItemGroup>', $start)
+        $group = $Text.Substring($start, $end - $start)
+        return @([regex]::Matches($group, 'Include="([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+    }
+    $productSources = Get-CesGroupSources -Text $projectText -Configuration 'Release'
+    $testSources = Get-CesGroupSources -Text $projectText -Configuration 'ReleaseTests'
+    $pureSources = Get-CesGroupSources -Text $projectText -Configuration 'ReleasePure'
+    if (@($productSources | Where-Object { $_ -like 'tests\*' }).Count -ne 0) {
+        $failures.Add('the product configuration lists test sources')
+    }
+    if ($productSources -notcontains 'src\main.cpp') {
+        $failures.Add('the product configuration does not list src\main.cpp')
+    }
+    if (@($testSources | Where-Object { $_ -eq 'src\main.cpp' }).Count -ne 0) {
+        $failures.Add('the test configuration lists the product entry point src\main.cpp')
+    }
+    if ($testSources -notcontains 'tests\ces_test_entry.cpp') {
+        $failures.Add('the test configuration does not list tests\ces_test_entry.cpp')
+    }
+    if ($pureSources -notcontains 'tests\ces_test_entry.cpp' -or $pureSources -notcontains 'tests\ces_pure_engine_tests.cpp') {
+        $failures.Add('the pure-engine configuration does not list its entry and suite')
+    }
+    if (@($pureSources | Where-Object { $_ -like '*native*' -or $_ -eq 'src\server.cpp' -or $_ -eq 'src\contract.cpp' }).Count -ne 0) {
+        $failures.Add('the pure-engine configuration lists a native or coordinator source')
+    }
+    if ($projectText -notmatch 'CES_PURE_ENGINE_ONLY') {
+        $failures.Add('no configuration defines CES_PURE_ENGINE_ONLY')
+    }
+    $pureMarker = Get-CesConfigurationMarker -Configuration 'ReleasePure' -Kind 'group'
+    $pureStart = $projectText.IndexOf($pureMarker)
+    if ($pureStart -ge 0) {
+        $pureEnd = $projectText.IndexOf('</ItemDefinitionGroup>', $pureStart)
+        if ($pureEnd -gt $pureStart) {
+            $segment = $projectText.Substring($pureStart, $pureEnd - $pureStart)
+            if ($segment -match 'ws2_32') { $failures.Add('the pure-engine configuration links ws2_32') }
+        }
+    }
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $Root 'src'), (Join-Path $Root 'tests') -File -Filter *.cpp) {
+        $relative = [System.IO.Path]::GetRelativePath($Root, $file.FullName)
+        if ($projectText -notmatch [regex]::Escape($relative)) {
+            $failures.Add('source is not listed in the project: ' + $relative)
+        }
+    }
 
     return $failures
 }

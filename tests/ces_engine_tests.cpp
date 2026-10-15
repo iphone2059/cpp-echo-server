@@ -473,7 +473,7 @@ static void ces_engine_test_admission_credit() noexcept {
                            "server admission release returns exactly one credit");
 }
 
-int main() {
+int ces_engine_tests_main() {
     ces_engine_test_lifecycle();
     ces_engine_test_handoff_disposition();
     ces_engine_test_owners();
