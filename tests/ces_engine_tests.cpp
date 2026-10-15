@@ -330,7 +330,7 @@ static void ces_engine_test_timer_model() noexcept {
             ++active_count;
             const std::uint32_t position = positions[index];
             valid                        = position < heap.size && nodes[position].connection_index == index &&
-                    nodes[position].deadline == deadlines[index];
+                                           nodes[position].deadline == deadlines[index];
             if (!minimum_found || deadlines[index] < minimum_deadline ||
                 (deadlines[index] == minimum_deadline && index < minimum_index)) {
                 minimum_found    = true;
@@ -371,14 +371,14 @@ static void ces_engine_test_statistics() noexcept {
                            "server statistics aggregate worker snapshots");
 
     ces_engine_statistics       large{ std::numeric_limits<std::uint64_t>::max() - 100U,
-                                 0,
-                                 0,
-                                 0,
-                                 std::numeric_limits<std::uint64_t>::max() - 4096U,
-                                 std::numeric_limits<std::uint64_t>::max() - 5000U,
-                                 std::numeric_limits<std::uint64_t>::max() - 4096U,
-                                 std::numeric_limits<std::uint64_t>::max() - 2U,
-                                 std::numeric_limits<std::uint64_t>::max() - 3U };
+                                       0,
+                                       0,
+                                       0,
+                                       std::numeric_limits<std::uint64_t>::max() - 4096U,
+                                       std::numeric_limits<std::uint64_t>::max() - 5000U,
+                                       std::numeric_limits<std::uint64_t>::max() - 4096U,
+                                       std::numeric_limits<std::uint64_t>::max() - 2U,
+                                       std::numeric_limits<std::uint64_t>::max() - 3U };
     const ces_engine_statistics remainder{ 100, 0, 0, 0, 4096, 5000, 4096, 2, 3 };
     ces_statistics_add(&large, &remainder);
     ces_engine_test_expect(large.accepted == std::numeric_limits<std::uint64_t>::max() &&

@@ -20,7 +20,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
                      "usage: cpp-echo-server-tests <suite> [mode]\n"
-                     "  suite: unit | engine | pure | fault <mode>\n");
+                     "  suite: contracts | engine | pure | fault <mode>\n");
         return 2;
     }
     const wchar_t* suite = argv[1];
@@ -31,7 +31,7 @@ int wmain(int argc, wchar_t** argv) {
     std::fprintf(stderr, "this executable only provides the pure engine suite\n");
     return 2;
 #else
-    if (std::wcscmp(suite, L"unit") == 0) {
+    if (std::wcscmp(suite, L"contracts") == 0) {
         return ces_tests_main();
     }
     if (std::wcscmp(suite, L"engine") == 0) {

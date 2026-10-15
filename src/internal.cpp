@@ -998,7 +998,7 @@ unsigned long __stdcall ces_engine_acceptor_thread(void* parameter) noexcept {
         OVERLAPPED* overlapped  = nullptr;
         const bool  drain_due   = acceptor->core.stopping && GetTickCount64() >= acceptor->drain_deadline;
         const BOOL  ok          = GetQueuedCompletionStatus(acceptor->transport->port, &transferred, &key, &overlapped,
-                                                  drain_due ? 0U : 100U);
+                                                            drain_due ? 0U : 100U);
         const DWORD wait_error  = ok == FALSE ? GetLastError() : ERROR_SUCCESS;
         if (drain_due) {
             // Each live accept slot can own one completion or handoff acknowledgement. Give
@@ -1207,7 +1207,7 @@ bool ces_engine_acceptor_initialize(ces_engine_acceptor*                acceptor
     acceptor->transport->operation_count = ces_accept_operation_count(worker_count);
     acceptor->transport->operations      = static_cast<ces_engine_accept_operation*>(
         HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                       sizeof(ces_engine_accept_operation) * acceptor->transport->operation_count));
+                  sizeof(ces_engine_accept_operation) * acceptor->transport->operation_count));
     resources->operations.reset(acceptor->transport->operations);
     acceptor->core.operation_count = acceptor->transport->operation_count;
     acceptor->operation_states.reset(new (std::nothrow) ces_accept_slot[acceptor->transport->operation_count]{});
@@ -1446,11 +1446,11 @@ ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         ces_engine_owned_socket_close(&socket_owner, &socket_value);
     }
     std::array<RIORESULT, ces_engine_batch_size> results{};
-    const auto                                   drain_results = [&](std::uint32_t maximum_batches,
+    const auto drain_results = [&](std::uint32_t maximum_batches,
                                    std::uint32_t maximum_results = std::numeric_limits<std::uint32_t>::max()) noexcept {
         for (std::uint32_t batch = 0; batch < maximum_batches && maximum_results != 0; ++batch) {
             const ULONG requested = std::min<ULONG>(static_cast<ULONG>(results.size()), maximum_results);
-            const ULONG count = ces_require_valid_dequeue_count(
+            const ULONG count     = ces_require_valid_dequeue_count(
                 rio->RIODequeueCompletion(completion_queue, results.data(), requested), L"RIODequeueCompletion(UDP)");
             if (count > requested) {
                 ces_engine_fail_fast(L"UDP RIO dequeue extent", ERROR_INVALID_DATA);

@@ -1,21 +1,18 @@
+# Formats every named-module source and test translation unit with the repository style.
 $ErrorActionPreference = 'Stop'
+$projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 
-# Named modules removed the include/ tree: every formatted input is a .cpp module interface unit,
-# a module implementation part or a plain test translation unit.
-$formatterCommand = Get-Command clang-format.exe -ErrorAction SilentlyContinue
-if ($null -eq $formatterCommand) {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-        throw 'clang-format.exe was not found in PATH or Visual Studio.'
-    }
-    $vsPath = & $vswhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ([string]::IsNullOrWhiteSpace($vsPath)) { throw 'Visual Studio with clang-format was not found.' }
-    $formatter = Join-Path $vsPath 'VC\Tools\Llvm\x64\bin\clang-format.exe'
-} else { $formatter = $formatterCommand.Source }
-if (-not (Test-Path -LiteralPath $formatter -PathType Leaf)) { throw 'clang-format.exe was not found.' }
-$files = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src'), (Join-Path $PSScriptRoot 'tests') -File -Recurse |
-    Where-Object { $_.Extension -eq '.cpp' }
-foreach ($file in $files) {
-    & $formatter -i --style=file $file.FullName
-    if ($LASTEXITCODE -ne 0) { throw "clang-format failed for $($file.FullName)" }
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere.exe was not found.' }
+$installation = (& $vswhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+if (-not $installation) { throw 'A Visual Studio installation with the x64 C++ tools was not found.' }
+$shipped = Join-Path $installation 'VC\Tools\Llvm\x64\bin\clang-format.exe'
+$formatter = if (Test-Path -LiteralPath $shipped -PathType Leaf) { $shipped } else {
+    $found = Get-Command clang-format.exe -ErrorAction SilentlyContinue
+    if ($null -ne $found) { $found.Source } else { throw 'clang-format.exe was not found.' }
 }
+
+$files = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src'), (Join-Path $projectRoot 'tests') -File -Recurse -Filter *.cpp
+& $formatter -i --style=file @($files | ForEach-Object { $_.FullName })
+if ($LASTEXITCODE -ne 0) { throw 'clang-format failed.' }
+Write-Host "PASS clang-format applied to $($files.Count) sources"

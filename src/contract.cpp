@@ -158,18 +158,18 @@ bool ces_parse_options(int             argc,
         return false;
     }
     *options            = ces_options{ ces_protocol::none,
-                            static_cast<std::uint16_t>(CES_DEFAULT_PORT),
-                            CES_DEFAULT_TCP_TIMEOUT_SECONDS,
-                            0,
-                            0,
-                            CES_DEFAULT_UDP_DEPTH,
-                            0,
-                            CES_DEFAULT_RIO_BUFFER_BYTES,
-                            CES_DEFAULT_CQ_CAPACITY,
-                            CES_DEFAULT_MEMORY_BYTES,
-                            false,
-                            false,
-                            false };
+                                       static_cast<std::uint16_t>(CES_DEFAULT_PORT),
+                                       CES_DEFAULT_TCP_TIMEOUT_SECONDS,
+                                       0,
+                                       0,
+                                       CES_DEFAULT_UDP_DEPTH,
+                                       0,
+                                       CES_DEFAULT_RIO_BUFFER_BYTES,
+                                       CES_DEFAULT_CQ_CAPACITY,
+                                       CES_DEFAULT_MEMORY_BYTES,
+                                       false,
+                                       false,
+                                       false };
     bool saw_timeout    = false;
     bool saw_udp_depth  = false;
     bool saw_rio_buffer = false;
