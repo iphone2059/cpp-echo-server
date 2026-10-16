@@ -591,7 +591,11 @@ void* ces_virtual_arena_owner::release() noexcept {
 
 void ces_virtual_arena_owner::reset(void* value) noexcept {
     if (value_ != nullptr) {
-        VirtualFree(value_, 0, MEM_RELEASE);
+        // A failed release means Windows still holds the whole registered region: that is a release
+        // boundary invariant, so it fails fast instead of being ignored.
+        if (VirtualFree(value_, 0, MEM_RELEASE) == 0) {
+            ces_engine_fail_fast(L"VirtualFree(arena)", static_cast<int>(GetLastError()));
+        }
     }
     value_ = value;
 }
