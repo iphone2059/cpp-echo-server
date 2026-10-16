@@ -189,6 +189,9 @@ export ces_handoff_disposition ces_engine_require_handoff_disposition(bool stopp
                                                                       bool failed,
                                                                       bool listener_valid,
                                                                       bool accepted_valid) noexcept;
+export void ces_engine_worker_observe_acceptor(ces_engine_worker* worker, const ces_native_acceptor* acceptor) noexcept;
+export ces_engine_accept_operation* ces_engine_worker_accept_operation(ces_engine_worker* worker,
+                                                                       std::uintptr_t     key) noexcept;
 
 ces_handoff_disposition ces_acceptor_handoff_disposition(bool stopping,
                                                          bool failed,
@@ -595,9 +598,11 @@ static DWORD WINAPI ces_engine_worker_thread(void* parameter) noexcept {
         } else if (overlapped == nullptr && key == ces_engine_admission_closed_key) {
             (void) ces_tcp_on_event(worker->core.get(), { ces_event_kind::admission_closed, {}, {} }, GetTickCount64());
         } else if (overlapped == nullptr && key > ces_engine_admission_closed_key) {
-            ces_engine_accept_operation* operation =
-                reinterpret_cast<ces_engine_accept_operation*>(static_cast<std::uintptr_t>(key));
-            ces_engine_take_socket(worker, operation);
+            // The keep-alive key is an accept operation address published by the acceptor. It is
+            // range-, alignment- and owner-checked before anything is dereferenced, exactly as the
+            // acceptor checks the addresses its own completions carry.
+            ces_engine_take_socket(worker,
+                                   ces_engine_worker_accept_operation(worker, static_cast<std::uintptr_t>(key)));
         } else if (ok == FALSE && error == WAIT_TIMEOUT && overlapped == nullptr) {
             if (!worker->core->stopping && worker->transport->rio_outstanding != 0 &&
                 !worker->transport->notification_armed) {
@@ -812,7 +817,6 @@ void ces_engine_worker_require_release(const ces_engine_worker* worker) noexcept
             worker->core->timers.size != 0) {
             ces_engine_fail_fast(L"worker release precondition", ERROR_INVALID_STATE);
         }
-#    ifndef NDEBUG
         if (worker->transport->notify_timeout_wakeups != 0) {
             ces_engine_fail_fast(L"worker notification starvation", ERROR_INVALID_STATE);
         }
@@ -820,7 +824,6 @@ void ces_engine_worker_require_release(const ces_engine_worker* worker) noexcept
             worker->transport->notify_arms - worker->transport->notify_deliveries > 1U) {
             ces_engine_fail_fast(L"worker notification accounting", ERROR_INVALID_STATE);
         }
-#    endif
     }
 }
 
@@ -960,6 +963,31 @@ static ces_engine_accept_operation* ces_engine_accept_operation_from_address(ces
     ces_engine_accept_operation* operation = reinterpret_cast<ces_engine_accept_operation*>(address);
     if (operation->owner != acceptor->transport.get()) {
         ces_engine_fail_fast(L"AcceptEx completion identity", ERROR_INVALID_DATA);
+    }
+    return operation;
+}
+
+void ces_engine_worker_observe_acceptor(ces_engine_worker* worker, const ces_native_acceptor* acceptor) noexcept {
+    if (worker == nullptr || worker->transport == nullptr) {
+        return;
+    }
+    worker->transport->accept_operations      = acceptor != nullptr ? acceptor->operations : nullptr;
+    worker->transport->accept_operation_count = acceptor != nullptr ? acceptor->operation_count : 0;
+    worker->transport->accept_owner           = acceptor;
+}
+
+ces_engine_accept_operation* ces_engine_worker_accept_operation(ces_engine_worker* worker,
+                                                                std::uintptr_t     key) noexcept {
+    const ces_native_worker* transport   = worker->transport.get();
+    const std::uintptr_t     first       = reinterpret_cast<std::uintptr_t>(transport->accept_operations);
+    const std::size_t        table_bytes = sizeof(ces_engine_accept_operation) * transport->accept_operation_count;
+    if (transport->accept_owner == nullptr || transport->accept_operations == nullptr || key < first ||
+        key - first >= table_bytes || (key - first) % sizeof(ces_engine_accept_operation) != 0) {
+        ces_engine_fail_fast(L"AcceptEx handoff identity", ERROR_INVALID_DATA);
+    }
+    ces_engine_accept_operation* operation = reinterpret_cast<ces_engine_accept_operation*>(key);
+    if (static_cast<const void*>(operation->owner) != transport->accept_owner) {
+        ces_engine_fail_fast(L"AcceptEx handoff identity", ERROR_INVALID_DATA);
     }
     return operation;
 }
@@ -1224,6 +1252,11 @@ bool ces_engine_acceptor_initialize(ces_engine_acceptor*                acceptor
         acceptor->transport->operations[index].accept_port = acceptor->transport->port;
         acceptor->core.slots[index].state                  = ces_accept_state::idle;
         acceptor->transport->operations[index].index       = index;
+    }
+    // Publish the table identity to every worker before the acceptor thread exists, so a handoff key
+    // is checked in the worker without a window where the identity is not yet visible.
+    for (std::uint32_t index = 0; index < worker_count; ++index) {
+        ces_engine_worker_observe_acceptor(&workers[index], acceptor->transport.get());
     }
     acceptor->transport->thread = CreateThread(nullptr, 0, ces_engine_acceptor_thread, acceptor, 0, nullptr);
     resources->thread.reset(acceptor->transport->thread);
@@ -1564,14 +1597,12 @@ ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     // pending RIONotify delivery is deliberately not awaited: the notification OVERLAPPED stays
     // valid until the IOCP handle is closed at the end of this function, which is the last object
     // that can reference it.
-#    ifndef NDEBUG
     if (notify_timeout_wakeups != 0) {
         ces_engine_fail_fast(L"UDP notification starvation", ERROR_INVALID_STATE);
     }
     if (notify_arms < notify_deliveries || notify_arms - notify_deliveries > 1U) {
         ces_engine_fail_fast(L"UDP notification accounting", ERROR_INVALID_STATE);
     }
-#    endif
     core.phase = ces_udp_phase::stopped;
     if (outstanding != 0 || !ces_udp_may_release(core.phase, core.outstanding)) {
         ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);

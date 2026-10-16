@@ -89,13 +89,19 @@ export struct ces_native_worker {
     // precondition requires it to be zero before the completion queue is closed.
     std::uint32_t                       rio_outstanding        = 0;
     // Notification accounting. A bounded wait that expires while RIO work is outstanding and no
-    // notification is armed means the queue was never armed for that work, so debug builds treat a
-    // non-zero starvation count as a failure instead of silently degrading to timeout polling.
+    // notification is armed means the queue was never armed for that work, so a non-zero starvation
+    // count fails in every build instead of silently degrading to timeout polling.
     std::uint64_t                       notify_arms            = 0;
     std::uint64_t                       notify_deliveries      = 0;
     std::uint64_t                       notify_timeout_wakeups = 0;
     std::uint32_t                       stride                 = 0;
     bool                                notification_armed     = false;
+    // The accept table this worker can receive handoffs from, published by the acceptor before its
+    // thread starts. A handoff control packet carries an accept operation address, and the worker
+    // range-, alignment- and owner-checks it against these before it dereferences anything.
+    const ces_engine_accept_operation*  accept_operations      = nullptr;
+    std::uint32_t                       accept_operation_count = 0;
+    const void*                         accept_owner           = nullptr;
 };
 
 export struct ces_native_acceptor {
