@@ -57,6 +57,8 @@ Invoke-FaultCase -Mode 'notify_precondition_duplicate' -ExpectedExitCode 4 -Expe
 Invoke-FaultCase -Mode 'corrupt_cq' -ExpectedExitCode 4
 Invoke-FaultCase -Mode 'completion_positive' -ExpectedExitCode 0
 Invoke-FaultCase -Mode 'completion_oversized' -ExpectedExitCode 4 -ExpectedStage 'worker completion exceeds posted range failed: native_error=13'
+Invoke-FaultCase -Mode 'completion_stale_generation' -ExpectedExitCode 4 -ExpectedStage 'worker completion generation failed: native_error=996'
+Invoke-FaultCase -Mode 'completion_stale_token' -ExpectedExitCode 4 -ExpectedStage 'worker completion identity failed: native_error=13'
 Invoke-FaultCase -Mode 'release_positive' -ExpectedExitCode 0
 Invoke-FaultCase -Mode 'release_outstanding' -ExpectedExitCode 4 -ExpectedStage 'worker release precondition failed: native_error=996'
 Invoke-FaultCase -Mode 'resource_deinit_outstanding' -ExpectedExitCode 4 -ExpectedStage 'worker release precondition failed: native_error=996'

@@ -525,21 +525,24 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
     ces_engine_connection* connection = &worker->transport->connections[index];
     connection->owner                 = worker->transport.get();
     worker->transport->resources->connection_sockets[index].reset(accepted_owner.release());
-    connection->socket             = accepted;
-    connection->index              = index;
-    connection->outstanding        = 0;
-    connection->request.connection = connection;
-    connection->request.operation  = ces_engine_operation::receive;
-    // This is the slot's only reuse point, so it is where the generation changes. The request
-    // contexts are embedded in the connection record, so retagging them here happens before any
-    // operation of the new generation can be posted. The tag is an identity rather than an
-    // ownership ledger, and wraps to one at the limit.
-    connection->generation         = connection->generation == UINT32_MAX ? 1U : connection->generation + 1U;
-    connection->request.generation = connection->generation;
-    connection->buffer.BufferId    = worker->transport->resources->registrations[index].get();
-    connection->buffer.Offset      = 0;
-    connection->buffer.Length      = worker->transport->stride;
-    connection->request_queue      = worker->transport->rio->RIOCreateRequestQueue(
+    connection->socket = accepted;
+    // The slot returned to the free pool only after the drain proved nothing of the previous
+    // generation was still owned by the provider, so neither the lane nor the accounting may carry a
+    // value here. This is checked instead of cleared: a blind reset would hide exactly the reuse the
+    // drain barrier exists to prevent.
+    if (connection->outstanding != 0 || connection->request.token != 0) {
+        ces_engine_fail_fast(L"TCP slot reuse precondition", ERROR_IO_INCOMPLETE);
+    }
+    connection->request.operation = ces_engine_operation::receive;
+    // The slot's only reuse point, so it is where the generation changes. Every submission carries the
+    // generation and its own serial inside the request context value, so a completion of the previous
+    // generation can still be told apart after this record has been rewritten for the new one. The
+    // generation is an identity rather than an ownership ledger, and wraps to one at the limit.
+    connection->generation        = connection->generation == UINT32_MAX ? 1U : connection->generation + 1U;
+    connection->buffer.BufferId   = worker->transport->resources->registrations[index].get();
+    connection->buffer.Offset     = 0;
+    connection->buffer.Length     = worker->transport->stride;
+    connection->request_queue     = worker->transport->rio->RIOCreateRequestQueue(
         accepted, 1, 1, 1, 1, worker->transport->completion_queue, worker->transport->completion_queue, connection);
     if (connection->request_queue == RIO_INVALID_RQ) {
         ces_engine_report(L"RIOCreateRequestQueue(TCP)", WSAGetLastError());
@@ -1456,7 +1459,7 @@ ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
             slots[index].payload            = RIO_BUF{ registration, 0, options->rio_buffer_bytes };
             slots[index].remote_address     = RIO_BUF{ registration, options->rio_buffer_bytes, CES_UDP_ADDRESS_BYTES };
             const ces_action action{ ces_action_kind::receive, index, 0, options->rio_buffer_bytes, {} };
-            if (!ces_native_udp_post(rio, request_queue, &slots[index], action, &outstanding)) {
+            if (!ces_native_udp_post(rio, request_queue, &slots[index], index, action, &outstanding)) {
                 const ces_failure failure{ L"RIOReceiveEx(UDP)", WSAGetLastError() };
                 ces_engine_report(failure.stage, failure.native_error);
                 (void) ces_udp_on_event(
@@ -1514,7 +1517,8 @@ ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                     ces_engine_owned_socket_close(&socket_owner, &socket_value);
                     continue;
                 }
-                if (!ces_native_udp_post(rio, request_queue, &slots[action.index], action, &outstanding)) {
+                if (!ces_native_udp_post(rio, request_queue, &slots[action.index], action.index, action,
+                                         &outstanding)) {
                     const ces_failure failure{ L"UDP RIO repost", WSAGetLastError() };
                     ces_engine_report(failure.stage, failure.native_error);
                     (void) ces_udp_on_event(
@@ -1614,7 +1618,7 @@ ces_exit_code ces_engine_run_udp(const RIO_EXTENSION_FUNCTION_TABLE* rio,
         ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
     }
     for (std::uint32_t index = 0; slots != nullptr && index < options->udp_depth; ++index) {
-        if (slots[index].outstanding || (states != nullptr && states[index].outstanding)) {
+        if (slots[index].token != 0 || (states != nullptr && states[index].outstanding)) {
             ces_engine_fail_fast(L"UDP cleanup with outstanding operations", ERROR_IO_INCOMPLETE);
         }
     }

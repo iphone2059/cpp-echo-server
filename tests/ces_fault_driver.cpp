@@ -154,24 +154,73 @@ static int ces_fault_accept_retries(DWORD status) noexcept {
 static int ces_fault_tcp_completion(bool oversized) noexcept {
     ces_native_worker     worker{};
     ces_engine_connection connection{};
-    worker.connections       = &connection;
-    worker.slot_count        = 1;
-    worker.rio_outstanding   = 1;
-    connection.owner         = &worker;
-    connection.index         = 0;
-    connection.outstanding   = 1;
-    connection.buffer.Length = 8;
-    connection.request       = { &connection, ces_engine_operation::receive };
+    worker.connections               = &connection;
+    worker.slot_count                = 1;
+    worker.rio_outstanding           = 1;
+    connection.owner                 = &worker;
+    connection.index                 = 0;
+    connection.outstanding           = 1;
+    connection.generation            = 1;
+    connection.request.operation     = ces_engine_operation::receive;
+    connection.request.sequence      = 1;
+    connection.request.token         = ces_operation_token_encode(0, ces_engine_operation::receive, 1, 1);
+    connection.request.posted_length = 8;
     RIORESULT result{};
-    result.RequestContext           = reinterpret_cast<ULONG_PTR>(&connection.request);
+    result.SocketContext            = reinterpret_cast<ULONG_PTR>(&connection);
+    result.RequestContext           = static_cast<ULONG_PTR>(connection.request.token);
     result.Status                   = ERROR_OPERATION_ABORTED;
     result.BytesTransferred         = oversized ? 9U : 0U;
     const ces_completion completion = ces_native_tcp_completion(&worker, result);
     worker.connections              = nullptr;
     return completion.status == 995 && completion.bytes == 0 && connection.outstanding == 0 &&
-                   worker.rio_outstanding == 0 ?
+                   worker.rio_outstanding == 0 && connection.request.token == 0 ?
                0 :
                1;
+}
+
+/// The token was posted by generation one and the slot was then adopted as generation two. The lane
+/// still matches the token, so only the generation carried by value inside the token can reject it.
+static int ces_fault_stale_completion_generation() noexcept {
+    ces_native_worker     worker{};
+    ces_engine_connection connection{};
+    worker.connections               = &connection;
+    worker.slot_count                = 1;
+    worker.rio_outstanding           = 1;
+    connection.owner                 = &worker;
+    connection.index                 = 0;
+    connection.outstanding           = 1;
+    connection.generation            = 2;
+    connection.request.operation     = ces_engine_operation::receive;
+    connection.request.sequence      = 1;
+    connection.request.token         = ces_operation_token_encode(0, ces_engine_operation::receive, 1, 1);
+    connection.request.posted_length = 8;
+    RIORESULT result{};
+    result.SocketContext  = reinterpret_cast<ULONG_PTR>(&connection);
+    result.RequestContext = static_cast<ULONG_PTR>(connection.request.token);
+    (void) ces_native_tcp_completion(&worker, result);
+    return 1;
+}
+
+/// A completion whose token does not match the posted lane: a stale retirement or a duplicate.
+static int ces_fault_stale_completion_token() noexcept {
+    ces_native_worker     worker{};
+    ces_engine_connection connection{};
+    worker.connections               = &connection;
+    worker.slot_count                = 1;
+    worker.rio_outstanding           = 1;
+    connection.owner                 = &worker;
+    connection.index                 = 0;
+    connection.outstanding           = 1;
+    connection.generation            = 1;
+    connection.request.operation     = ces_engine_operation::receive;
+    connection.request.sequence      = 2;
+    connection.request.token         = ces_operation_token_encode(0, ces_engine_operation::receive, 1, 2);
+    connection.request.posted_length = 8;
+    RIORESULT result{};
+    result.SocketContext  = reinterpret_cast<ULONG_PTR>(&connection);
+    result.RequestContext = static_cast<ULONG_PTR>(ces_operation_token_encode(0, ces_engine_operation::receive, 1, 1));
+    (void) ces_native_tcp_completion(&worker, result);
+    return 1;
 }
 
 static int ces_fault_worker_release(bool invalid, bool implicit) noexcept {
@@ -383,6 +432,10 @@ int ces_fault_driver_main(int argc, wchar_t** argv) {
         return ces_fault_tcp_completion(false);
     } else if (std::wcscmp(argv[1], L"completion_oversized") == 0) {
         return ces_fault_tcp_completion(true);
+    } else if (std::wcscmp(argv[1], L"completion_stale_generation") == 0) {
+        return ces_fault_stale_completion_generation();
+    } else if (std::wcscmp(argv[1], L"completion_stale_token") == 0) {
+        return ces_fault_stale_completion_token();
     } else if (std::wcscmp(argv[1], L"release_positive") == 0) {
         return ces_fault_worker_release(false, false);
     } else if (std::wcscmp(argv[1], L"release_outstanding") == 0) {

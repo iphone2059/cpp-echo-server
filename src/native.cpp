@@ -46,14 +46,56 @@ export struct ces_native_acceptor;
 export class ces_engine_worker_resources;
 export class ces_engine_acceptor_resources;
 
+/// Identity of one RIO submission. The provider carries this value back, so it cannot change when
+/// the slot is reused: a completion that arrives after the slot was handed to a new generation still
+/// carries the generation and the submission serial of the operation that was actually posted. A
+/// pointer into the reusable connection record cannot express that, because the record is rewritten at
+/// the reuse point and the retire path would read the new values.
+export inline constexpr unsigned ces_operation_slot_bits        = 16U;
+export inline constexpr unsigned ces_operation_kind_bits        = 2U;
+export inline constexpr unsigned ces_operation_generation_bits  = 16U;
+export inline constexpr unsigned ces_operation_sequence_bits    = 30U;
+export inline constexpr unsigned ces_operation_kind_shift       = ces_operation_slot_bits;
+export inline constexpr unsigned ces_operation_generation_shift = ces_operation_slot_bits + ces_operation_kind_bits;
+export inline constexpr unsigned ces_operation_sequence_shift =
+    ces_operation_generation_shift + ces_operation_generation_bits;
+export inline constexpr std::uint64_t ces_operation_slot_mask = (std::uint64_t{ 1 } << ces_operation_slot_bits) - 1U;
+export inline constexpr std::uint64_t ces_operation_kind_mask = (std::uint64_t{ 1 } << ces_operation_kind_bits) - 1U;
+export inline constexpr std::uint64_t ces_operation_generation_mask =
+    (std::uint64_t{ 1 } << ces_operation_generation_bits) - 1U;
+export inline constexpr std::uint64_t ces_operation_max_sequence =
+    (std::uint64_t{ 1 } << ces_operation_sequence_bits) - 1U;
+
+/// Operation kinds are encoded one-based, so a valid token is never zero and a decoded kind of zero
+/// is always invalid. The layout is a value, not a pointer: the provider carries it back unchanged.
+export inline constexpr std::uint64_t ces_operation_token_encode(std::uint64_t        slot,
+                                                                 ces_engine_operation operation,
+                                                                 std::uint32_t        generation,
+                                                                 std::uint64_t        sequence) noexcept {
+    return ((sequence & ces_operation_max_sequence) << ces_operation_sequence_shift) |
+           ((static_cast<std::uint64_t>(generation) & ces_operation_generation_mask)
+            << ces_operation_generation_shift) |
+           (((static_cast<std::uint64_t>(operation) + 1U) & ces_operation_kind_mask) << ces_operation_kind_shift) |
+           (slot & ces_operation_slot_mask);
+}
+
+export struct ces_operation_identity {
+    std::uint32_t        slot       = 0;
+    std::uint32_t        generation = 0;
+    std::uint64_t        sequence   = 0;
+    ces_engine_operation operation  = ces_engine_operation::receive;
+};
+
+export ces_operation_identity ces_operation_token_decode(std::uint64_t token, const wchar_t* stage) noexcept;
+
+/// Ownership ledger of the slot's currently posted RIO operation. The token is the immutable identity
+/// handed to the provider, the sequence is the slot's submission serial (never reset across
+/// generations), and posted_length is the extent that was submitted together with that token.
 export struct ces_engine_request {
-    ces_engine_connection* connection;
-    ces_engine_operation   operation;
-    /// The generation this stable request context belongs to. The context lives inside the
-    /// connection record, so its address never changes between generations and the tag travels with
-    /// it, letting the retire path reject a completion that belongs to a generation the slot has
-    /// already left.
-    std::uint32_t          generation = 0;
+    std::uint64_t        token         = 0;
+    std::uint32_t        posted_length = 0;
+    std::uint32_t        sequence      = 0;
+    ces_engine_operation operation     = ces_engine_operation::receive;
 };
 
 export struct ces_engine_accept_operation {
@@ -128,8 +170,10 @@ export struct ces_native_acceptor {
 export struct ces_engine_udp_slot {
     RIO_BUF              payload;
     RIO_BUF              remote_address;
-    ces_engine_operation operation;
-    bool                 outstanding;
+    ces_engine_operation operation     = ces_engine_operation::receive;
+    std::uint64_t        token         = 0;
+    std::uint32_t        posted_length = 0;
+    std::uint32_t        sequence      = 0;
 };
 
 export class ces_socket_owner {
@@ -305,6 +349,7 @@ export ces_completion ces_native_tcp_completion(ces_native_worker* worker, const
 export bool           ces_native_udp_post(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                                           RIO_RQ                              queue,
                                           ces_engine_udp_slot*                slot,
+                                          std::uint32_t                       index,
                                           const ces_action&                   action,
                                           std::uint32_t*                      outstanding) noexcept;
 export ces_completion ces_native_udp_completion(ces_engine_udp_slot* slots,
@@ -399,6 +444,23 @@ ces_native_acceptor::~ces_native_acceptor() noexcept {
     std::fprintf(stderr, "%s failed: native_error=%d\n", text, error);
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(ces_exit_code::internal));
     __assume(0);
+}
+
+ces_operation_identity ces_operation_token_decode(std::uint64_t token, const wchar_t* stage) noexcept {
+    ces_operation_identity identity{};
+    if (token == 0) {
+        ces_engine_fail_fast(stage, ERROR_INVALID_DATA);
+    }
+    const std::uint64_t kind = (token >> ces_operation_kind_shift) & ces_operation_kind_mask;
+    identity.slot            = static_cast<std::uint32_t>(token & ces_operation_slot_mask);
+    identity.generation =
+        static_cast<std::uint32_t>((token >> ces_operation_generation_shift) & ces_operation_generation_mask);
+    identity.sequence = token >> ces_operation_sequence_shift;
+    if (kind == 0 || kind > 2U || identity.sequence == 0) {
+        ces_engine_fail_fast(stage, ERROR_INVALID_DATA);
+    }
+    identity.operation = kind == 1U ? ces_engine_operation::receive : ces_engine_operation::send;
+    return identity;
 }
 
 void ces_write_diagnostics(const ces_notify_diagnostic_snapshot* values,
@@ -847,76 +909,105 @@ bool ces_native_tcp_post(ces_native_worker*     worker,
                          ces_engine_connection* connection,
                          const ces_action&      action,
                          ces_failure*           failure) noexcept {
-    if (connection->outstanding != 0) {
+    if (connection->outstanding != 0 || connection->request.token != 0) {
         ces_engine_fail_fast(L"worker duplicate RIO post", ERROR_INVALID_STATE);
     }
-    connection->request.operation =
+    const ces_engine_operation operation =
         action.kind == ces_action_kind::send ? ces_engine_operation::send : ces_engine_operation::receive;
-    connection->buffer.Offset = action.kind == ces_action_kind::send ? action.offset : 0;
-    connection->buffer.Length = action.kind == ces_action_kind::send ? action.length : worker->stride;
+    connection->request.operation = operation;
+    connection->buffer.Offset     = action.kind == ces_action_kind::send ? action.offset : 0;
+    connection->buffer.Length     = action.kind == ces_action_kind::send ? action.length : worker->stride;
     if (connection->buffer.Offset > worker->stride ||
         connection->buffer.Length > worker->stride - connection->buffer.Offset) {
         ces_engine_fail_fast(L"server send window", ERROR_INVALID_DATA);
     }
-    const BOOL posted =
-        action.kind == ces_action_kind::send ?
-            worker->rio->RIOSend(connection->request_queue, &connection->buffer, 1, 0, &connection->request) :
-            worker->rio->RIOReceive(connection->request_queue, &connection->buffer, 1, 0, &connection->request);
+    const std::uint64_t sequence = static_cast<std::uint64_t>(connection->request.sequence) + 1U;
+    if (sequence > ces_operation_max_sequence ||
+        static_cast<std::uint64_t>(connection->index) > ces_operation_slot_mask) {
+        ces_engine_fail_fast(L"worker operation sequence", ERROR_INVALID_DATA);
+    }
+    const std::uint64_t token =
+        ces_operation_token_encode(connection->index, operation, connection->generation, sequence);
+    void* const context = reinterpret_cast<void*>(static_cast<std::uintptr_t>(token));
+    const BOOL  posted  = operation == ces_engine_operation::send ?
+                              worker->rio->RIOSend(connection->request_queue, &connection->buffer, 1, 0, context) :
+                              worker->rio->RIOReceive(connection->request_queue, &connection->buffer, 1, 0, context);
     if (posted == FALSE) {
-        *failure = { action.kind == ces_action_kind::send ? L"RIOSend" : L"RIOReceive", WSAGetLastError() };
+        // The provider refused the submission synchronously, so no completion can own this token: the
+        // lane stays idle and the serial is not consumed, exactly like a reservation rollback.
+        *failure = { operation == ces_engine_operation::send ? L"RIOSend" : L"RIOReceive", WSAGetLastError() };
         return false;
     }
+    connection->request.sequence      = static_cast<std::uint32_t>(sequence);
+    connection->request.token         = token;
+    connection->request.posted_length = connection->buffer.Length;
     ++connection->outstanding;
     ++worker->rio_outstanding;
     return true;
 }
 
 ces_completion ces_native_tcp_completion(ces_native_worker* worker, const RIORESULT& result) noexcept {
-    const std::uintptr_t address     = static_cast<std::uintptr_t>(result.RequestContext);
-    const std::uintptr_t first       = reinterpret_cast<std::uintptr_t>(worker->connections);
-    const std::size_t    table_bytes = sizeof(ces_engine_connection) * worker->slot_count;
-    if (worker->connections == nullptr || address < first || address - first >= table_bytes ||
-        (address - first) % sizeof(ces_engine_connection) != offsetof(ces_engine_connection, request)) {
+    const std::uint64_t          token    = static_cast<std::uint64_t>(result.RequestContext);
+    const ces_operation_identity identity = ces_operation_token_decode(token, L"worker RIO RequestContext");
+    if (worker->connections == nullptr || identity.slot >= worker->slot_count) {
         ces_engine_fail_fast(L"worker RIO RequestContext", ERROR_INVALID_DATA);
     }
-    ces_engine_connection*    connection = &worker->connections[(address - first) / sizeof(ces_engine_connection)];
-    const ces_engine_request* request    = reinterpret_cast<const ces_engine_request*>(address);
-    if (request->connection != connection || connection->owner != worker ||
-        (request->operation != ces_engine_operation::receive && request->operation != ces_engine_operation::send)) {
+    ces_engine_connection* connection = &worker->connections[identity.slot];
+    if (connection->owner != worker ||
+        static_cast<std::uintptr_t>(result.SocketContext) != reinterpret_cast<std::uintptr_t>(connection)) {
         ces_engine_fail_fast(L"worker RIO RequestContext", ERROR_INVALID_DATA);
     }
-    if (request->generation != connection->generation) {
+    // The token is the identity the provider carried back; the lane holds the identity of the operation
+    // this slot believes is posted. A completion from an earlier generation fails here even though the
+    // record it used to point at has since been rewritten for the new generation.
+    if (connection->request.token != token || connection->request.operation != identity.operation) {
+        ces_engine_fail_fast(L"worker completion identity", ERROR_INVALID_DATA);
+    }
+    if ((connection->generation & static_cast<std::uint32_t>(ces_operation_generation_mask)) != identity.generation) {
         ces_engine_fail_fast(L"worker completion generation", ERROR_IO_INCOMPLETE);
     }
     if (connection->outstanding != 1 || worker->rio_outstanding == 0) {
         ces_engine_fail_fast(L"worker RIO outstanding count", ERROR_INVALID_DATA);
     }
-    if (result.BytesTransferred > connection->buffer.Length) {
+    if (result.BytesTransferred > connection->request.posted_length) {
         ces_engine_fail_fast(L"worker completion exceeds posted range", ERROR_INVALID_DATA);
     }
+    connection->request.token         = 0;
+    connection->request.posted_length = 0;
     --connection->outstanding;
     --worker->rio_outstanding;
-    return { connection->index, request->operation, result.Status, result.BytesTransferred };
+    return { connection->index, identity.operation, result.Status, result.BytesTransferred };
 }
 
 bool ces_native_udp_post(const RIO_EXTENSION_FUNCTION_TABLE* rio,
                          RIO_RQ                              queue,
                          ces_engine_udp_slot*                slot,
+                         std::uint32_t                       index,
                          const ces_action&                   action,
                          std::uint32_t*                      outstanding) noexcept {
-    if (slot->outstanding) {
+    if (slot->token != 0) {
         ces_engine_fail_fast(L"UDP duplicate post", ERROR_INVALID_STATE);
     }
-    slot->operation = action.kind == ces_action_kind::send ? ces_engine_operation::send : ces_engine_operation::receive;
-    slot->payload.Length = action.length;
-    const BOOL posted =
-        slot->operation == ces_engine_operation::send ?
-            rio->RIOSendEx(queue, &slot->payload, 1, nullptr, &slot->remote_address, nullptr, nullptr, 0, slot) :
-            rio->RIOReceiveEx(queue, &slot->payload, 1, nullptr, &slot->remote_address, nullptr, nullptr, 0, slot);
+    const ces_engine_operation operation =
+        action.kind == ces_action_kind::send ? ces_engine_operation::send : ces_engine_operation::receive;
+    slot->operation              = operation;
+    slot->payload.Length         = action.length;
+    const std::uint64_t sequence = static_cast<std::uint64_t>(slot->sequence) + 1U;
+    if (sequence > ces_operation_max_sequence || static_cast<std::uint64_t>(index) > ces_operation_slot_mask) {
+        ces_engine_fail_fast(L"UDP operation sequence", ERROR_INVALID_DATA);
+    }
+    const std::uint64_t token   = ces_operation_token_encode(index, operation, 0U, sequence);
+    void* const         context = reinterpret_cast<void*>(static_cast<std::uintptr_t>(token));
+    const BOOL          posted =
+        operation == ces_engine_operation::send ?
+            rio->RIOSendEx(queue, &slot->payload, 1, nullptr, &slot->remote_address, nullptr, nullptr, 0, context) :
+            rio->RIOReceiveEx(queue, &slot->payload, 1, nullptr, &slot->remote_address, nullptr, nullptr, 0, context);
     if (posted == FALSE) {
         return false;
     }
-    slot->outstanding = true;
+    slot->sequence      = static_cast<std::uint32_t>(sequence);
+    slot->token         = token;
+    slot->posted_length = slot->payload.Length;
     ++*outstanding;
     return true;
 }
@@ -925,22 +1016,21 @@ ces_completion ces_native_udp_completion(ces_engine_udp_slot* slots,
                                          std::uint32_t        depth,
                                          std::uint32_t*       outstanding,
                                          const RIORESULT&     result) noexcept {
-    const std::uintptr_t address     = static_cast<std::uintptr_t>(result.RequestContext);
-    const std::uintptr_t first       = reinterpret_cast<std::uintptr_t>(slots);
-    const std::size_t    table_bytes = sizeof(ces_engine_udp_slot) * depth;
-    if (slots == nullptr || address < first || address - first >= table_bytes ||
-        (address - first) % sizeof(ces_engine_udp_slot) != 0) {
+    const std::uint64_t          token    = static_cast<std::uint64_t>(result.RequestContext);
+    const ces_operation_identity identity = ces_operation_token_decode(token, L"UDP completion identity");
+    if (slots == nullptr || identity.slot >= depth ||
+        static_cast<std::uintptr_t>(result.SocketContext) != reinterpret_cast<std::uintptr_t>(slots)) {
         ces_engine_fail_fast(L"UDP completion identity", ERROR_INVALID_DATA);
     }
-    ces_engine_udp_slot* slot = reinterpret_cast<ces_engine_udp_slot*>(address);
-    if (!slot->outstanding || *outstanding == 0) {
+    ces_engine_udp_slot* slot = &slots[identity.slot];
+    if (slot->token != token || slot->operation != identity.operation || *outstanding == 0) {
         ces_engine_fail_fast(L"UDP completion invariant", ERROR_INVALID_DATA);
     }
-    if (result.BytesTransferred > slot->payload.Length) {
+    if (result.BytesTransferred > slot->posted_length) {
         ces_engine_fail_fast(L"UDP completion exceeds posted range", ERROR_INVALID_DATA);
     }
-    slot->outstanding = false;
+    slot->token         = 0;
+    slot->posted_length = 0;
     --*outstanding;
-    return { static_cast<std::uint32_t>((address - first) / sizeof(ces_engine_udp_slot)), slot->operation,
-             result.Status, result.BytesTransferred };
+    return { identity.slot, identity.operation, result.Status, result.BytesTransferred };
 }
