@@ -530,6 +530,12 @@ static void ces_engine_take_socket(ces_engine_worker* worker, ces_engine_accept_
     connection->outstanding        = 0;
     connection->request.connection = connection;
     connection->request.operation  = ces_engine_operation::receive;
+    // This is the slot's only reuse point, so it is where the generation changes. The request
+    // contexts are embedded in the connection record, so retagging them here happens before any
+    // operation of the new generation can be posted. The tag is an identity rather than an
+    // ownership ledger, and wraps to one at the limit.
+    connection->generation         = connection->generation == UINT32_MAX ? 1U : connection->generation + 1U;
+    connection->request.generation = connection->generation;
     connection->buffer.BufferId    = worker->transport->resources->registrations[index].get();
     connection->buffer.Offset      = 0;
     connection->buffer.Length      = worker->transport->stride;

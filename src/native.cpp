@@ -49,6 +49,11 @@ export class ces_engine_acceptor_resources;
 export struct ces_engine_request {
     ces_engine_connection* connection;
     ces_engine_operation   operation;
+    /// The generation this stable request context belongs to. The context lives inside the
+    /// connection record, so its address never changes between generations and the tag travels with
+    /// it, letting the retire path reject a completion that belongs to a generation the slot has
+    /// already left.
+    std::uint32_t          generation = 0;
 };
 
 export struct ces_engine_accept_operation {
@@ -69,6 +74,9 @@ export struct ces_engine_connection {
     RIO_BUF            buffer;
     ces_engine_request request;
     std::uint32_t      index;
+    /// Identity of the generation currently admitted into this slot. It changes only where a
+    /// handoff adopts the slot, once the free pool proved nothing of the previous one is in flight.
+    std::uint32_t      generation = 0;
     std::uint32_t      outstanding;
 };
 
@@ -872,6 +880,9 @@ ces_completion ces_native_tcp_completion(ces_native_worker* worker, const RIORES
     if (request->connection != connection || connection->owner != worker ||
         (request->operation != ces_engine_operation::receive && request->operation != ces_engine_operation::send)) {
         ces_engine_fail_fast(L"worker RIO RequestContext", ERROR_INVALID_DATA);
+    }
+    if (request->generation != connection->generation) {
+        ces_engine_fail_fast(L"worker completion generation", ERROR_IO_INCOMPLETE);
     }
     if (connection->outstanding != 1 || worker->rio_outstanding == 0) {
         ces_engine_fail_fast(L"worker RIO outstanding count", ERROR_INVALID_DATA);
