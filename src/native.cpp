@@ -66,6 +66,15 @@ export inline constexpr std::uint64_t ces_operation_generation_mask =
 export inline constexpr std::uint64_t ces_operation_max_sequence =
     (std::uint64_t{ 1 } << ces_operation_sequence_bits) - 1U;
 
+/// Submission serials wrap, exactly like the generation tag: uniqueness inside one generation comes
+/// from the one-outstanding-operation invariant and from comparing the token with the posted lane
+/// exactly, so a wrapped value can only alias a completion that stayed unretired for a further 2^30
+/// submissions of the same slot. Failing fast at the limit would instead end a long-running worker.
+export inline constexpr std::uint64_t ces_operation_next_sequence(std::uint32_t current) noexcept {
+    const std::uint64_t next = static_cast<std::uint64_t>(current) + 1U;
+    return next > ces_operation_max_sequence ? 1U : next;
+}
+
 /// Operation kinds are encoded one-based, so a valid token is never zero and a decoded kind of zero
 /// is always invalid. The layout is a value, not a pointer: the provider carries it back unchanged.
 export inline constexpr std::uint64_t ces_operation_token_encode(std::uint64_t        slot,
@@ -921,11 +930,10 @@ bool ces_native_tcp_post(ces_native_worker*     worker,
         connection->buffer.Length > worker->stride - connection->buffer.Offset) {
         ces_engine_fail_fast(L"server send window", ERROR_INVALID_DATA);
     }
-    const std::uint64_t sequence = static_cast<std::uint64_t>(connection->request.sequence) + 1U;
-    if (sequence > ces_operation_max_sequence ||
-        static_cast<std::uint64_t>(connection->index) > ces_operation_slot_mask) {
-        ces_engine_fail_fast(L"worker operation sequence", ERROR_INVALID_DATA);
+    if (static_cast<std::uint64_t>(connection->index) > ces_operation_slot_mask) {
+        ces_engine_fail_fast(L"worker operation slot", ERROR_INVALID_DATA);
     }
+    const std::uint64_t sequence = ces_operation_next_sequence(connection->request.sequence);
     const std::uint64_t token =
         ces_operation_token_encode(connection->index, operation, connection->generation, sequence);
     void* const context = reinterpret_cast<void*>(static_cast<std::uintptr_t>(token));
@@ -990,14 +998,14 @@ bool ces_native_udp_post(const RIO_EXTENSION_FUNCTION_TABLE* rio,
     }
     const ces_engine_operation operation =
         action.kind == ces_action_kind::send ? ces_engine_operation::send : ces_engine_operation::receive;
-    slot->operation              = operation;
-    slot->payload.Length         = action.length;
-    const std::uint64_t sequence = static_cast<std::uint64_t>(slot->sequence) + 1U;
-    if (sequence > ces_operation_max_sequence || static_cast<std::uint64_t>(index) > ces_operation_slot_mask) {
-        ces_engine_fail_fast(L"UDP operation sequence", ERROR_INVALID_DATA);
+    slot->operation      = operation;
+    slot->payload.Length = action.length;
+    if (static_cast<std::uint64_t>(index) > ces_operation_slot_mask) {
+        ces_engine_fail_fast(L"UDP operation slot", ERROR_INVALID_DATA);
     }
-    const std::uint64_t token   = ces_operation_token_encode(index, operation, 0U, sequence);
-    void* const         context = reinterpret_cast<void*>(static_cast<std::uintptr_t>(token));
+    const std::uint64_t sequence = ces_operation_next_sequence(slot->sequence);
+    const std::uint64_t token    = ces_operation_token_encode(index, operation, 0U, sequence);
+    void* const         context  = reinterpret_cast<void*>(static_cast<std::uintptr_t>(token));
     const BOOL          posted =
         operation == ces_engine_operation::send ?
             rio->RIOSendEx(queue, &slot->payload, 1, nullptr, &slot->remote_address, nullptr, nullptr, 0, context) :
